@@ -50,13 +50,24 @@ async def notify_admin(context, user_name, username, user_text, reply):
     except Exception as e:
         logging.error(f"Ошибка дублирования: {e}")
 
-def extract_reminder_essence(text):
-    cleaned = re.sub(r'(напомни|напоминание|пришли|отправь|скажи|напиши)\s*(мне)?\s*(пожалуйста)?\s*', '', text, flags=re.IGNORECASE)
-    cleaned = re.sub(r'\bв\s+\d{1,2}[:.]\d{2}\b', '', cleaned, flags=re.IGNORECASE)
-    cleaned = re.sub(r'\bв\s+\d{1,2}\s*(часов|час)?\b', '', cleaned, flags=re.IGNORECASE)
-    cleaned = re.sub(r'\bчто\b', '', cleaned, flags=re.IGNORECASE)
-    cleaned = cleaned.strip().strip(',').strip()
-    return cleaned if cleaned else text
+async def rephrase_reminder(text):
+    """Перефразирует напоминание от лица ассистента через Groq"""
+    try:
+        response = groq_client.chat.completions.create(
+            model="llama-3.3-70b-versatile",
+            messages=[
+                {
+                    "role": "system",
+                    "content": "Ты помощник. Перефразируй напоминание от лица ассистента — коротко, без местоимения 'мне', без слова 'напомни', без времени. Только суть от третьего лица. Например: 'завтра мне нужно заработать 1 000 000' -> 'завтра нужно заработать 1 000 000'. Отвечай только перефразированным текстом без лишних слов."
+                },
+                {"role": "user", "content": text}
+            ],
+            max_tokens=100,
+            temperature=0.3
+        )
+        return response.choices[0].message.content.strip()
+    except:
+        return text
 
 def extract_time(text):
     time_match = re.search(r'(\d{1,2})[:\.](\d{2})', text)
@@ -73,7 +84,6 @@ def is_reminder_request(text):
     return time_match and any(k in text.lower() for k in keywords)
 
 def check_conflict(user_id, hour, minute):
-    """Проверяет есть ли уже задача в это время"""
     time_str = f"{hour:02d}:{minute:02d}"
     reminders = user_reminders.get(user_id, [])
     for r in reminders:
@@ -88,7 +98,7 @@ async def send_scheduled_reminder(context: ContextTypes.DEFAULT_TYPE):
     name = user_data.get(user_id, {}).get("name", "")
     await context.bot.send_message(
         chat_id=user_id,
-        text=f"⏰ {name}, напоминаю!\n\n{essence}"
+        text=f"⏰ {name}, напоминаю!\n\n{essence[0].upper() + essence[1:] if essence else \x27\x27}"
     )
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -239,11 +249,9 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     history.append({"role": "user", "content": user_text})
     await context.bot.send_chat_action(chat_id=update.effective_chat.id, action="typing")
     try:
-        # Проверяем запрос на напоминание
         if is_reminder_request(user_text):
             hour, minute = extract_time(user_text)
             if hour is not None:
-                # Проверяем конфликт
                 conflict = check_conflict(user_id, hour, minute)
                 if conflict:
                     conflict_msg = f"⚠️ {name}, в {hour:02d}:{minute:02d} у вас уже запланировано:\n\n«{conflict}»\n\nВыбрать другое время?"
@@ -251,7 +259,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     await notify_admin(context, user_name, username, user_text, conflict_msg)
                     return
 
-                essence = extract_reminder_essence(user_text)
+                essence = await rephrase_reminder(user_text)
                 tz = pytz.timezone(user_data.get(user_id, {}).get("timezone", "Europe/Moscow"))
                 job_name = f"reminder_{user_id}_{hour}_{minute}"
                 old_jobs = context.application.job_queue.get_jobs_by_name(job_name)
