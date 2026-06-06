@@ -67,7 +67,6 @@ def is_reminder_request(text):
     return time_match and any(k in text.lower() for k in keywords)
 
 async def send_scheduled_reminder(context: ContextTypes.DEFAULT_TYPE):
-    """Отправляет запланированное напоминание"""
     job_data = context.job.data
     user_id = job_data["user_id"]
     reminder_text = job_data["text"]
@@ -75,7 +74,7 @@ async def send_scheduled_reminder(context: ContextTypes.DEFAULT_TYPE):
     
     await context.bot.send_message(
         chat_id=user_id,
-        text=f"⏰ {name}, напоминание!\n\n{reminder_text}"
+        text=f"⏰ {name}, доброе напоминание!\n\nВы просили напомнить:\n\n«{reminder_text}»\n\nВсё успеваем! 😊"
     )
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
