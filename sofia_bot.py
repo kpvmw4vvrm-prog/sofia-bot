@@ -2,6 +2,7 @@ import logging
 import re
 import os
 import tempfile
+import httpx
 from datetime import datetime, time, timedelta
 import pytz
 import asyncpg
@@ -182,12 +183,16 @@ async def rephrase_reminder(text):
 
 async def transcribe_voice(file_path):
     with open(file_path, "rb") as f:
-        transcription = groq_client.audio.transcriptions.create(
-            model="whisper-large-v3",
-            file=("voice.ogg", f),
-            language="ru"
+        file_data = f.read()
+    async with httpx.AsyncClient(timeout=30) as client:
+        response = await client.post(
+            "https://api.groq.com/openai/v1/audio/transcriptions",
+            headers={"Authorization": f"Bearer {GROQ_API_KEY}"},
+            files={"file": ("voice.ogg", file_data, "audio/ogg")},
+            data={"model": "whisper-large-v3", "language": "ru"}
         )
-    return transcription.text
+    result = response.json()
+    return result.get("text", "")
 
 def extract_exact_time(text):
     time_match = re.search(r'(\d{1,2})[:\.](\d{2})', text)
@@ -379,28 +384,21 @@ async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if not user or not user["onboarded"]:
         await update.message.reply_text("Напишите /start чтобы начать 🌸")
         return
-
     await context.bot.send_chat_action(chat_id=update.effective_chat.id, action="typing")
-
     try:
         voice = update.message.voice
         file = await context.bot.get_file(voice.file_id)
-
         with tempfile.NamedTemporaryFile(suffix=".ogg", delete=False) as tmp:
             tmp_path = tmp.name
-
         await file.download_to_drive(tmp_path)
         user_text = await transcribe_voice(tmp_path)
         os.unlink(tmp_path)
-
         if not user_text:
             await update.message.reply_text("Не смогла распознать голосовое сообщение. Попробуйте ещё раз.")
             return
-
         await update.message.reply_text(f"🎤 Распознала: _{user_text}_", parse_mode="Markdown")
         update.message.text = user_text
         await handle_message(update, context)
-
     except Exception as e:
         logging.error(f"Ошибка голосового: {e}")
         await update.message.reply_text("Не удалось обработать голосовое сообщение. Попробуйте написать текстом.")
@@ -458,7 +456,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                         name=job_name
                     )
                     await add_reminder(user_id, time_str, essence)
-
         response = groq_client.chat.completions.create(
             model="llama-3.3-70b-versatile",
             messages=[{"role": "system", "content": SYSTEM_PROMPT}, *history],
