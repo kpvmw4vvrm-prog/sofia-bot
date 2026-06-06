@@ -35,6 +35,7 @@ SYSTEM_PROMPT = """Ты — София, личный ассистент. Общ�
 user_data = {}
 user_histories = {}
 user_reminders = {}
+all_users = set()
 
 def get_history(user_id):
     if user_id not in user_histories:
@@ -51,21 +52,21 @@ async def notify_admin(context, user_name, username, user_text, reply):
         logging.error(f"Ошибка дублирования: {e}")
 
 async def rephrase_reminder(text):
-    """Перефразирует напоминание от лица ассистента через Groq"""
     try:
         response = groq_client.chat.completions.create(
             model="llama-3.3-70b-versatile",
             messages=[
                 {
                     "role": "system",
-                    "content": "Ты помощник. Перефразируй напоминание от лица ассистента — коротко, без местоимения 'мне', без слова 'напомни', без времени. Только суть от третьего лица. Например: 'завтра мне нужно заработать 1 000 000' -> 'завтра нужно заработать 1 000 000'. Отвечай только перефразированным текстом без лишних слов."
+                    "content": "Перефразируй напоминание от лица ассистента — коротко, без 'мне', без 'напомни', без времени. Только суть. Например: 'завтра мне нужно заработать 1 000 000' -> 'Завтра нужно заработать 1 000 000'. Отвечай только перефразированным текстом."
                 },
                 {"role": "user", "content": text}
             ],
             max_tokens=100,
             temperature=0.3
         )
-        return response.choices[0].message.content.strip()
+        result = response.choices[0].message.content.strip()
+        return result[0].upper() + result[1:] if result else text
     except:
         return text
 
@@ -98,11 +99,43 @@ async def send_scheduled_reminder(context: ContextTypes.DEFAULT_TYPE):
     name = user_data.get(user_id, {}).get("name", "")
     await context.bot.send_message(
         chat_id=user_id,
-        text=f"⏰ {name}, напоминаю!\n\n" + (essence[0].upper() + essence[1:] if essence else '')
+        text=f"⏰ {name}, напоминаю!\n\n" + essence
+    )
+
+async def announce(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    """Рассылка всем пользователям — только для админа"""
+    user_id = update.effective_user.id
+    if user_id != ADMIN_ID:
+        await update.message.reply_text("У вас нет доступа к этой команде.")
+        return
+
+    if not context.args:
+        await update.message.reply_text(
+            "Укажите текст рассылки.\n\nПример:\n/announce Привет! У Софии новые функции 🎉"
+        )
+        return
+
+    text = " ".join(context.args)
+    sent = 0
+    failed = 0
+
+    await update.message.reply_text(f"Начинаю рассылку для {len(all_users)} пользователей...")
+
+    for uid in all_users:
+        try:
+            await context.bot.send_message(chat_id=uid, text=f"📢 {text}")
+            sent += 1
+        except Exception as e:
+            logging.error(f"Не удалось отправить {uid}: {e}")
+            failed += 1
+
+    await update.message.reply_text(
+        f"Рассылка завершена!\n\n✅ Отправлено: {sent}\n❌ Не доставлено: {failed}"
     )
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
+    all_users.add(user_id)
     user_histories[user_id] = []
     user_name = update.effective_user.first_name or "Новый пользователь"
     username = update.effective_user.username or "нет username"
@@ -126,6 +159,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def ask_name(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
+    all_users.add(user_id)
     name = update.message.text.strip()
     user_data[user_id] = {"name": name}
     username = update.effective_user.username or "нет username"
@@ -238,6 +272,7 @@ async def send_morning_plan(context: ContextTypes.DEFAULT_TYPE):
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
+    all_users.add(user_id)
     if user_id not in user_data:
         await update.message.reply_text("Напишите /start чтобы начать 🌸")
         return
@@ -258,7 +293,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     await update.message.reply_text(conflict_msg)
                     await notify_admin(context, user_name, username, user_text, conflict_msg)
                     return
-
                 essence = await rephrase_reminder(user_text)
                 tz = pytz.timezone(user_data.get(user_id, {}).get("timezone", "Europe/Moscow"))
                 job_name = f"reminder_{user_id}_{hour}_{minute}"
@@ -285,7 +319,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         history.append({"role": "assistant", "content": reply})
         if len(history) > 20:
             user_histories[user_id] = history[-20:]
-
         await update.message.reply_text(reply)
         await notify_admin(context, user_name, username, user_text, reply)
     except Exception as e:
@@ -311,6 +344,7 @@ if __name__ == "__main__":
         fallbacks=[CommandHandler("start", start)]
     )
     app.add_handler(conv_handler)
+    app.add_handler(CommandHandler("announce", announce))
     app.add_handler(CommandHandler("clear", clear))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     print("🌸 София запущена!")
