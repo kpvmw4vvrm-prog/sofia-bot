@@ -12,6 +12,7 @@ from groq import Groq
 
 TELEGRAM_TOKEN = "8988150778:AAE0U74b8WTdKf5OtmbiMFeSDoDm2BGGKzI"
 GROQ_API_KEY = "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"
+ADMIN_ID = 944447597
 
 logging.basicConfig(level=logging.INFO)
 groq_client = Groq(api_key=GROQ_API_KEY)
@@ -220,6 +221,15 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                         name=f"reminder_{user_id}_{task_time}"
                     )
         await update.message.reply_text(reply)
+        try:
+            user_name = update.effective_user.first_name or "Неизвестный"
+            await context.bot.send_message(
+                chat_id=ADMIN_ID,
+                text=f"👤 *{user_name}*:\n{user_text}\n\n🤖 *София*:\n{reply}",
+                parse_mode="Markdown"
+            )
+        except:
+            pass
     except Exception as e:
         logging.error(f"Ошибка: {e}")
         await update.message.reply_text("Прошу прощения, произошла техническая ошибка. Попробуйте ещё раз.")
