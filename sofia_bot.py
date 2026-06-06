@@ -29,7 +29,7 @@ SYSTEM_PROMPT = """Ты — София, личный ассистент. Общ�
 🕘 09:00 — задача
 🕙 10:00 — задача
 
-Когда пользователь просит напомнить что-то в определённое время — подтверди и скажи что напоминание установлено.
+Когда пользователь просит напомнить — подтверди кратко что напоминание установлено.
 """
 
 user_data = {}
@@ -50,8 +50,15 @@ async def notify_admin(context, user_name, username, user_text, reply):
     except Exception as e:
         logging.error(f"Ошибка дублирования: {e}")
 
-def extract_time_and_text(text):
-    """Извлекает время и текст напоминания из сообщения"""
+def extract_reminder_essence(text):
+    cleaned = re.sub(r'(напомни|напоминание|пришли|отправь|скажи|напиши)\s*(мне)?\s*(пожалуйста)?\s*', '', text, flags=re.IGNORECASE)
+    cleaned = re.sub(r'\bв\s+\d{1,2}[:.]\d{2}\b', '', cleaned, flags=re.IGNORECASE)
+    cleaned = re.sub(r'\bв\s+\d{1,2}\s*(часов|час)?\b', '', cleaned, flags=re.IGNORECASE)
+    cleaned = re.sub(r'\bчто\b', '', cleaned, flags=re.IGNORECASE)
+    cleaned = cleaned.strip().strip(',').strip()
+    return cleaned if cleaned else text
+
+def extract_time(text):
     time_match = re.search(r'(\d{1,2})[:\.](\d{2})', text)
     if time_match:
         hour = int(time_match.group(1))
@@ -61,20 +68,27 @@ def extract_time_and_text(text):
     return None, None
 
 def is_reminder_request(text):
-    """Проверяет является ли сообщение запросом на напоминание"""
-    keywords = ["напомни", "напоминание", "в ", "пришли", "отправь", "скажи"]
-    time_match = re.search(r'\d{1,2}[:\.]?\d{0,2}', text)
+    keywords = ["напомни", "напоминание", "пришли", "отправь", "напиши"]
+    time_match = re.search(r'\d{1,2}[:.]\d{2}', text)
     return time_match and any(k in text.lower() for k in keywords)
+
+def check_conflict(user_id, hour, minute):
+    """Проверяет есть ли уже задача в это время"""
+    time_str = f"{hour:02d}:{minute:02d}"
+    reminders = user_reminders.get(user_id, [])
+    for r in reminders:
+        if r["time"] == time_str:
+            return r["text"]
+    return None
 
 async def send_scheduled_reminder(context: ContextTypes.DEFAULT_TYPE):
     job_data = context.job.data
     user_id = job_data["user_id"]
-    reminder_text = job_data["text"]
+    essence = job_data["essence"]
     name = user_data.get(user_id, {}).get("name", "")
-    
     await context.bot.send_message(
         chat_id=user_id,
-        text=f"⏰ {name}, доброе напоминание!\n\nВы просили напомнить:\n\n«{reminder_text}»\n\nВсё успеваем! 😊"
+        text=f"⏰ {name}, напоминаю!\n\n{essence}"
     )
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -89,10 +103,10 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "Каждое утро присылаю структурированный список задач на день\n\n"
         "2. ⏰ Напоминания\n"
         "Скажите «напомни в 15:00 о встрече» — пришлю точно в срок\n\n"
-        "3. 🧠 Запоминаю всё\n"
+        "3. 🗓 Контроль расписания\n"
+        "Слежу за накладками — предупрежу если время занято\n\n"
+        "4. 🧠 Запоминаю всё\n"
         "Помню весь наш диалог и ваши предпочтения\n\n"
-        "4. ✅ Список дел\n"
-        "Добавляйте задачи — я всё структурирую и сохраню\n\n"
         "5. 💬 Всегда на связи\n"
         "Пишите в любое время — отвечу быстро\n\n"
         "Давайте познакомимся поближе — как вас зовут? )"
@@ -159,8 +173,7 @@ async def ask_morning_time(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def ask_reminders_step(update: Update, context: ContextTypes.DEFAULT_TYPE):
     keyboard = [["✅ За час", "⏰ За 30 минут", "❌ Не нужно"]]
     await update.message.reply_text(
-        "Напоминать о запланированных делах заранее? 🙂\n\n"
-        "Например: «Через час у вас встреча в 15:00»",
+        "Напоминать о запланированных делах заранее? 🙂",
         reply_markup=ReplyKeyboardMarkup(keyboard, one_time_keyboard=True, resize_keyboard=True)
     )
     return ASK_REMINDERS
@@ -207,7 +220,7 @@ async def send_morning_plan(context: ContextTypes.DEFAULT_TYPE):
     if reminders:
         plan_text = "\n".join([f"🕐 {r['time']} — {r['text']}" for r in sorted(reminders, key=lambda x: x["time"])])
     else:
-        plan_text = "На сегодня задачи не добавлены.\nНапишите мне что запланировано — я структурирую )"
+        plan_text = "На сегодня задачи не добавлены."
     await context.bot.send_message(
         chat_id=user_id,
         text=f"Доброе утро, {name}! ☀️\n\nВаш план на сегодня:\n\n{plan_text}"
@@ -221,10 +234,39 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_text = update.message.text
     user_name = update.effective_user.first_name or "Пользователь"
     username = update.effective_user.username or "нет username"
+    name = user_data.get(user_id, {}).get("name", "")
     history = get_history(user_id)
     history.append({"role": "user", "content": user_text})
     await context.bot.send_chat_action(chat_id=update.effective_chat.id, action="typing")
     try:
+        # Проверяем запрос на напоминание
+        if is_reminder_request(user_text):
+            hour, minute = extract_time(user_text)
+            if hour is not None:
+                # Проверяем конфликт
+                conflict = check_conflict(user_id, hour, minute)
+                if conflict:
+                    conflict_msg = f"⚠️ {name}, в {hour:02d}:{minute:02d} у вас уже запланировано:\n\n«{conflict}»\n\nВыбрать другое время?"
+                    await update.message.reply_text(conflict_msg)
+                    await notify_admin(context, user_name, username, user_text, conflict_msg)
+                    return
+
+                essence = extract_reminder_essence(user_text)
+                tz = pytz.timezone(user_data.get(user_id, {}).get("timezone", "Europe/Moscow"))
+                job_name = f"reminder_{user_id}_{hour}_{minute}"
+                old_jobs = context.application.job_queue.get_jobs_by_name(job_name)
+                for job in old_jobs:
+                    job.schedule_removal()
+                context.application.job_queue.run_daily(
+                    send_scheduled_reminder,
+                    time=time(hour=hour, minute=minute, tzinfo=tz),
+                    data={"user_id": user_id, "essence": essence, "name": name},
+                    name=job_name
+                )
+                if user_id not in user_reminders:
+                    user_reminders[user_id] = []
+                user_reminders[user_id].append({"time": f"{hour:02d}:{minute:02d}", "text": essence})
+
         response = groq_client.chat.completions.create(
             model="llama-3.3-70b-versatile",
             messages=[{"role": "system", "content": SYSTEM_PROMPT}, *history],
@@ -235,34 +277,6 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         history.append({"role": "assistant", "content": reply})
         if len(history) > 20:
             user_histories[user_id] = history[-20:]
-
-        # Проверяем запрос на напоминание
-        if is_reminder_request(user_text):
-            hour, minute = extract_time_and_text(user_text)
-            if hour is not None:
-                tz = pytz.timezone(user_data.get(user_id, {}).get("timezone", "Europe/Moscow"))
-                now = datetime.now(tz)
-                remind_time = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
-
-                # Если время уже прошло — ставим на следующий день через run_daily
-                job_name = f"reminder_{user_id}_{hour}_{minute}"
-
-                # Удаляем старое напоминание с тем же именем если есть
-                old_jobs = context.application.job_queue.get_jobs_by_name(job_name)
-                for job in old_jobs:
-                    job.schedule_removal()
-
-                # Добавляем задачу
-                context.application.job_queue.run_daily(
-                    send_scheduled_reminder,
-                    time=time(hour=hour, minute=minute, tzinfo=tz),
-                    data={"user_id": user_id, "text": user_text},
-                    name=job_name
-                )
-
-                if user_id not in user_reminders:
-                    user_reminders[user_id] = []
-                user_reminders[user_id].append({"time": f"{hour:02d}:{minute:02d}", "text": user_text})
 
         await update.message.reply_text(reply)
         await notify_admin(context, user_name, username, user_text, reply)
