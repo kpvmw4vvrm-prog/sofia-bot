@@ -1,5 +1,6 @@
 import logging
-from datetime import time
+import re
+from datetime import datetime, time
 import pytz
 from telegram import Update, ReplyKeyboardMarkup, ReplyKeyboardRemove
 from telegram.ext import (
@@ -27,6 +28,8 @@ SYSTEM_PROMPT = """Ты — София, личный ассистент. Общ�
 Формат плана дня:
 🕘 09:00 — задача
 🕙 10:00 — задача
+
+Когда пользователь просит напомнить что-то в определённое время — подтверди и скажи что напоминание установлено.
 """
 
 user_data = {}
@@ -47,6 +50,34 @@ async def notify_admin(context, user_name, username, user_text, reply):
     except Exception as e:
         logging.error(f"Ошибка дублирования: {e}")
 
+def extract_time_and_text(text):
+    """Извлекает время и текст напоминания из сообщения"""
+    time_match = re.search(r'(\d{1,2})[:\.](\d{2})', text)
+    if time_match:
+        hour = int(time_match.group(1))
+        minute = int(time_match.group(2))
+        if 0 <= hour <= 23 and 0 <= minute <= 59:
+            return hour, minute
+    return None, None
+
+def is_reminder_request(text):
+    """Проверяет является ли сообщение запросом на напоминание"""
+    keywords = ["напомни", "напоминание", "в ", "пришли", "отправь", "скажи"]
+    time_match = re.search(r'\d{1,2}[:\.]?\d{0,2}', text)
+    return time_match and any(k in text.lower() for k in keywords)
+
+async def send_scheduled_reminder(context: ContextTypes.DEFAULT_TYPE):
+    """Отправляет запланированное напоминание"""
+    job_data = context.job.data
+    user_id = job_data["user_id"]
+    reminder_text = job_data["text"]
+    name = user_data.get(user_id, {}).get("name", "")
+    
+    await context.bot.send_message(
+        chat_id=user_id,
+        text=f"⏰ {name}, напоминание!\n\n{reminder_text}"
+    )
+
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     user_histories[user_id] = []
@@ -58,7 +89,7 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "1. 📋 Утренний план\n"
         "Каждое утро присылаю структурированный список задач на день\n\n"
         "2. ⏰ Напоминания\n"
-        "Предупреждаю заранее — вы никогда ничего не пропустите\n\n"
+        "Скажите «напомни в 15:00 о встрече» — пришлю точно в срок\n\n"
         "3. 🧠 Запоминаю всё\n"
         "Помню весь наш диалог и ваши предпочтения\n\n"
         "4. ✅ Список дел\n"
@@ -183,16 +214,6 @@ async def send_morning_plan(context: ContextTypes.DEFAULT_TYPE):
         text=f"Доброе утро, {name}! ☀️\n\nВаш план на сегодня:\n\n{plan_text}"
     )
 
-async def send_reminder(context: ContextTypes.DEFAULT_TYPE):
-    data = context.job.data
-    user_id = data["user_id"]
-    name = user_data.get(user_id, {}).get("name", "")
-    mins = user_data.get(user_id, {}).get("reminder_before", 60)
-    await context.bot.send_message(
-        chat_id=user_id,
-        text=f"⏰ {name}, напоминаю!\n\nЧерез {mins} минут: {data['text']}\nВремя события: {data['event_time']}"
-    )
-
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     if user_id not in user_data:
@@ -215,26 +236,35 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         history.append({"role": "assistant", "content": reply})
         if len(history) > 20:
             user_histories[user_id] = history[-20:]
-        import re
-        time_match = re.search(r"(\d{1,2})[:\.](\d{2})", user_text)
-        if time_match and any(w in user_text.lower() for w in ["встреч", "запис", "напомни", "совещ"]):
-            hour, minute = time_match.groups()
-            task_time = f"{int(hour):02d}:{minute}"
-            if user_id not in user_reminders:
-                user_reminders[user_id] = []
-            user_reminders[user_id].append({"time": task_time, "text": user_text})
-            mins = user_data.get(user_id, {}).get("reminder_before", 60)
-            if mins > 0:
-                remind_hour = int(hour) - (mins // 60)
-                if remind_hour >= 0:
-                    tz = pytz.timezone(user_data.get(user_id, {}).get("timezone", "Europe/Moscow"))
-                    remind_time = time(hour=remind_hour, minute=int(minute), tzinfo=tz)
-                    context.application.job_queue.run_daily(
-                        send_reminder,
-                        time=remind_time,
-                        data={"user_id": user_id, "text": user_text, "event_time": task_time},
-                        name=f"reminder_{user_id}_{task_time}"
-                    )
+
+        # Проверяем запрос на напоминание
+        if is_reminder_request(user_text):
+            hour, minute = extract_time_and_text(user_text)
+            if hour is not None:
+                tz = pytz.timezone(user_data.get(user_id, {}).get("timezone", "Europe/Moscow"))
+                now = datetime.now(tz)
+                remind_time = now.replace(hour=hour, minute=minute, second=0, microsecond=0)
+
+                # Если время уже прошло — ставим на следующий день через run_daily
+                job_name = f"reminder_{user_id}_{hour}_{minute}"
+
+                # Удаляем старое напоминание с тем же именем если есть
+                old_jobs = context.application.job_queue.get_jobs_by_name(job_name)
+                for job in old_jobs:
+                    job.schedule_removal()
+
+                # Добавляем задачу
+                context.application.job_queue.run_daily(
+                    send_scheduled_reminder,
+                    time=time(hour=hour, minute=minute, tzinfo=tz),
+                    data={"user_id": user_id, "text": user_text},
+                    name=job_name
+                )
+
+                if user_id not in user_reminders:
+                    user_reminders[user_id] = []
+                user_reminders[user_id].append({"time": f"{hour:02d}:{minute:02d}", "text": user_text})
+
         await update.message.reply_text(reply)
         await notify_admin(context, user_name, username, user_text, reply)
     except Exception as e:
