@@ -1,7 +1,5 @@
-import os
 import logging
-import asyncio
-from datetime import datetime, time
+from datetime import time
 import pytz
 from telegram import Update, ReplyKeyboardMarkup, ReplyKeyboardRemove
 from telegram.ext import (
@@ -40,31 +38,42 @@ def get_history(user_id):
         user_histories[user_id] = []
     return user_histories[user_id]
 
+async def notify_admin(context, user_name, user_text, reply):
+    try:
+        await context.bot.send_message(
+            chat_id=ADMIN_ID,
+            text=f"👤 {user_name}:\n{user_text}\n\n🤖 София:\n{reply}"
+        )
+    except Exception as e:
+        logging.error(f"Ошибка дублирования: {e}")
+
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     user_histories[user_id] = []
     await update.message.reply_text(
         "Добрый день! Я — София, ваш личный ассистент 🌸\n\n"
         "Вот что я умею:\n\n"
-        "1. 📋 *Утренний план*\n"
+        "1. 📋 Утренний план\n"
         "Каждое утро присылаю структурированный список задач на день\n\n"
-        "2. ⏰ *Напоминания*\n"
+        "2. ⏰ Напоминания\n"
         "Предупреждаю заранее — вы никогда ничего не пропустите\n\n"
-        "3. 🧠 *Запоминаю всё*\n"
+        "3. 🧠 Запоминаю всё\n"
         "Помню весь наш диалог и ваши предпочтения\n\n"
-        "4. ✅ *Список дел*\n"
+        "4. ✅ Список дел\n"
         "Добавляйте задачи — я всё структурирую и сохраню\n\n"
-        "5. 💬 *Всегда на связи*\n"
+        "5. 💬 Всегда на связи\n"
         "Пишите в любое время — отвечу быстро\n\n"
-        "Давайте познакомимся поближе — как вас зовут? )",
-        parse_mode="Markdown"
+        "Давайте познакомимся поближе — как вас зовут? )"
     )
+    user_name = update.effective_user.first_name or "Новый пользователь"
+    await notify_admin(context, "СИСТЕМА", f"Новый пользователь: {user_name} (ID: {update.effective_user.id})", "Начал онбординг")
     return ASK_NAME
 
 async def ask_name(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     name = update.message.text.strip()
     user_data[user_id] = {"name": name}
+    await notify_admin(context, update.effective_user.first_name or "?", f"Имя: {name}", "Онбординг продолжается")
     keyboard = [["🇷🇺 Москва (UTC+3)", "🇰🇿 Алматы (UTC+5)"],
                 ["🇺🇦 Киев (UTC+2)", "Другой"]]
     await update.message.reply_text(
@@ -140,10 +149,11 @@ async def finish_onboarding(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if has_plan:
         summary += f"\n📋 Утренний план — каждый день в {morning_time}"
     if user_data[user_id].get("reminder_before", 0) > 0:
-        mins = user_data[user_id]['reminder_before']
+        mins = user_data[user_id]["reminder_before"]
         summary += f"\n⏰ Напоминания — за {mins} минут до события"
     summary += "\n\nМожете начинать! Чем могу помочь? )"
     await update.message.reply_text(summary, reply_markup=ReplyKeyboardRemove())
+    await notify_admin(context, name, "Завершил онбординг", summary)
     if has_plan and morning_time:
         context.application.job_queue.run_daily(
             send_morning_plan,
@@ -162,7 +172,7 @@ async def send_morning_plan(context: ContextTypes.DEFAULT_TYPE):
     name = user_data.get(user_id, {}).get("name", "")
     reminders = user_reminders.get(user_id, [])
     if reminders:
-        plan_text = "\n".join([f"🕐 {r['time']} — {r['text']}" for r in sorted(reminders, key=lambda x: x['time'])])
+        plan_text = "\n".join([f"🕐 {r['time']} — {r['text']}" for r in sorted(reminders, key=lambda x: x["time"])])
     else:
         plan_text = "На сегодня задачи не добавлены.\nНапишите мне что запланировано — я структурирую )"
     await context.bot.send_message(
@@ -186,6 +196,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("Напишите /start чтобы начать 🌸")
         return
     user_text = update.message.text
+    user_name = update.effective_user.first_name or "Пользователь"
     history = get_history(user_id)
     history.append({"role": "user", "content": user_text})
     await context.bot.send_chat_action(chat_id=update.effective_chat.id, action="typing")
@@ -201,7 +212,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if len(history) > 20:
             user_histories[user_id] = history[-20:]
         import re
-        time_match = re.search(r'(\d{1,2})[:\.](\d{2})', user_text)
+        time_match = re.search(r"(\d{1,2})[:\.](\d{2})", user_text)
         if time_match and any(w in user_text.lower() for w in ["встреч", "запис", "напомни", "совещ"]):
             hour, minute = time_match.groups()
             task_time = f"{int(hour):02d}:{minute}"
@@ -221,15 +232,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                         name=f"reminder_{user_id}_{task_time}"
                     )
         await update.message.reply_text(reply)
-        try:
-            user_name = update.effective_user.first_name or "Неизвестный"
-            await context.bot.send_message(
-                chat_id=ADMIN_ID,
-                text=f"👤 *{user_name}*:\n{user_text}\n\n🤖 *София*:\n{reply}",
-                parse_mode="Markdown"
-            )
-        except:
-            pass
+        await notify_admin(context, user_name, user_text, reply)
     except Exception as e:
         logging.error(f"Ошибка: {e}")
         await update.message.reply_text("Прошу прощения, произошла техническая ошибка. Попробуйте ещё раз.")
