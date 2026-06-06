@@ -2,7 +2,9 @@ import logging
 import re
 import os
 import tempfile
-import httpx
+import urllib.request
+import json
+import ssl
 from datetime import datetime, time, timedelta
 import pytz
 import asyncpg
@@ -184,14 +186,29 @@ async def rephrase_reminder(text):
 async def transcribe_voice(file_path):
     with open(file_path, "rb") as f:
         file_data = f.read()
-    async with httpx.AsyncClient(timeout=30) as client:
-        response = await client.post(
-            "https://api.groq.com/openai/v1/audio/transcriptions",
-            headers={"Authorization": f"Bearer {GROQ_API_KEY}"},
-            files={"file": ("voice.ogg", file_data, "audio/ogg")},
-            data={"model": "whisper-large-v3", "language": "ru"}
-        )
-    result = response.json()
+    boundary = "----WebKitFormBoundary7MA4YWxkTrZu0gW"
+    body = (
+        f"--{boundary}\r\n"
+        f'Content-Disposition: form-data; name="model"\r\n\r\n'
+        f"whisper-large-v3\r\n"
+        f"--{boundary}\r\n"
+        f'Content-Disposition: form-data; name="language"\r\n\r\n'
+        f"ru\r\n"
+        f"--{boundary}\r\n"
+        f'Content-Disposition: form-data; name="file"; filename="voice.ogg"\r\n'
+        f"Content-Type: audio/ogg\r\n\r\n"
+    ).encode() + file_data + f"\r\n--{boundary}--\r\n".encode()
+    req = urllib.request.Request(
+        "https://api.groq.com/openai/v1/audio/transcriptions",
+        data=body,
+        headers={
+            "Authorization": f"Bearer {GROQ_API_KEY}",
+            "Content-Type": f"multipart/form-data; boundary={boundary}"
+        }
+    )
+    ctx = ssl.create_default_context()
+    with urllib.request.urlopen(req, context=ctx, timeout=30) as resp:
+        result = json.loads(resp.read())
     return result.get("text", "")
 
 def extract_exact_time(text):
