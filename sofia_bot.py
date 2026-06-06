@@ -447,6 +447,30 @@ async def clear(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await conn.execute("DELETE FROM history WHERE user_id = $1", user_id)
     await update.message.reply_text("История очищена 🌸")
 
+async def stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    if user_id != ADMIN_ID:
+        await update.message.reply_text("У вас нет доступа к этой команде.")
+        return
+    async with db_pool.acquire() as conn:
+        total = await conn.fetchval("SELECT COUNT(*) FROM users WHERE onboarded = TRUE")
+        today = await conn.fetchval(
+            "SELECT COUNT(DISTINCT user_id) FROM history WHERE created_at >= NOW() - INTERVAL '1 day'"
+        )
+        week = await conn.fetchval(
+            "SELECT COUNT(DISTINCT user_id) FROM history WHERE created_at >= NOW() - INTERVAL '7 days'"
+        )
+        total_messages = await conn.fetchval("SELECT COUNT(*) FROM history WHERE role = 'user'")
+
+    text = (
+        "📊 *Статистика Софии*\n\n"
+        f"👥 Всего пользователей: *{total}*\n"
+        f"🟢 Активных сегодня: *{today}*\n"
+        f"📅 Активных за 7 дней: *{week}*\n"
+        f"💬 Всего сообщений: *{total_messages}*"
+    )
+    await update.message.reply_text(text, parse_mode="Markdown")
+
 async def post_init(application):
     await init_db()
 
@@ -465,6 +489,7 @@ if __name__ == "__main__":
     )
     app.add_handler(conv_handler)
     app.add_handler(CommandHandler("announce", announce))
+    app.add_handler(CommandHandler("stats", stats))
     app.add_handler(CommandHandler("clear", clear))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     print("🌸 София запущена с базой данных!")
