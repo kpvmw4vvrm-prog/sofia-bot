@@ -98,7 +98,7 @@ async def send_scheduled_reminder(context: ContextTypes.DEFAULT_TYPE):
     name = user_data.get(user_id, {}).get("name", "")
     await context.bot.send_message(
         chat_id=user_id,
-        text=f"⏰ {name}, напоминаю!\n\n{essence[0].upper() + essence[1:] if essence else \x27\x27}"
+        text=f"⏰ {name}, напоминаю!\n\n" + (essence[0].upper() + essence[1:] if essence else '')
     )
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
