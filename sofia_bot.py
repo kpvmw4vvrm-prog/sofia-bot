@@ -38,11 +38,11 @@ def get_history(user_id):
         user_histories[user_id] = []
     return user_histories[user_id]
 
-async def notify_admin(context, user_name, user_text, reply):
+async def notify_admin(context, user_name, username, user_text, reply):
     try:
         await context.bot.send_message(
             chat_id=ADMIN_ID,
-            text=f"👤 {user_name}:\n{user_text}\n\n🤖 София:\n{reply}"
+            text=f"👤 {user_name} @{username}:\n{user_text}\n\n🤖 София:\n{reply}"
         )
     except Exception as e:
         logging.error(f"Ошибка дублирования: {e}")
@@ -50,6 +50,8 @@ async def notify_admin(context, user_name, user_text, reply):
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     user_histories[user_id] = []
+    user_name = update.effective_user.first_name or "Новый пользователь"
+    username = update.effective_user.username or "нет username"
     await update.message.reply_text(
         "Добрый день! Я — София, ваш личный ассистент 🌸\n\n"
         "Вот что я умею:\n\n"
@@ -65,15 +67,15 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
         "Пишите в любое время — отвечу быстро\n\n"
         "Давайте познакомимся поближе — как вас зовут? )"
     )
-    user_name = update.effective_user.first_name or "Новый пользователь"
-    await notify_admin(context, "СИСТЕМА", f"Новый пользователь: {user_name} (ID: {update.effective_user.id})", "Начал онбординг")
+    await notify_admin(context, user_name, username, f"Новый пользователь (ID: {user_id})", "Начал онбординг")
     return ASK_NAME
 
 async def ask_name(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     name = update.message.text.strip()
     user_data[user_id] = {"name": name}
-    await notify_admin(context, update.effective_user.first_name or "?", f"Имя: {name}", "Онбординг продолжается")
+    username = update.effective_user.username or "нет username"
+    await notify_admin(context, update.effective_user.first_name or "?", username, f"Представился: {name}", "Онбординг")
     keyboard = [["🇷🇺 Москва (UTC+3)", "🇰🇿 Алматы (UTC+5)"],
                 ["🇺🇦 Киев (UTC+2)", "Другой"]]
     await update.message.reply_text(
@@ -153,7 +155,8 @@ async def finish_onboarding(update: Update, context: ContextTypes.DEFAULT_TYPE):
         summary += f"\n⏰ Напоминания — за {mins} минут до события"
     summary += "\n\nМожете начинать! Чем могу помочь? )"
     await update.message.reply_text(summary, reply_markup=ReplyKeyboardRemove())
-    await notify_admin(context, name, "Завершил онбординг", summary)
+    username = update.effective_user.username or "нет username"
+    await notify_admin(context, name, username, "Завершил онбординг", summary)
     if has_plan and morning_time:
         context.application.job_queue.run_daily(
             send_morning_plan,
@@ -197,6 +200,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
         return
     user_text = update.message.text
     user_name = update.effective_user.first_name or "Пользователь"
+    username = update.effective_user.username or "нет username"
     history = get_history(user_id)
     history.append({"role": "user", "content": user_text})
     await context.bot.send_chat_action(chat_id=update.effective_chat.id, action="typing")
@@ -232,7 +236,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
                         name=f"reminder_{user_id}_{task_time}"
                     )
         await update.message.reply_text(reply)
-        await notify_admin(context, user_name, user_text, reply)
+        await notify_admin(context, user_name, username, user_text, reply)
     except Exception as e:
         logging.error(f"Ошибка: {e}")
         await update.message.reply_text("Прошу прощения, произошла техническая ошибка. Попробуйте ещё раз.")
