@@ -5,6 +5,7 @@ import tempfile
 import httpx
 import random
 from datetime import datetime, time, timedelta
+from timezonefinder import TimezoneFinder
 import pytz
 import asyncpg
 import assemblyai as aai
@@ -25,8 +26,9 @@ DATABASE_URL = os.environ.get("DATABASE_URL")
 logging.basicConfig(level=logging.INFO)
 groq_client = Groq(api_key=GROQ_API_KEY)
 aai.settings.api_key = ASSEMBLYAI_KEY
+tf = TimezoneFinder()
 
-ASK_NAME, ASK_TIMEZONE, ASK_CITY, ASK_MORNING_PLAN, ASK_MORNING_TIME, ASK_REMINDERS = range(6)
+ASK_NAME, ASK_CITY, ASK_MORNING_PLAN, ASK_MORNING_TIME, ASK_REMINDERS = range(5)
 
 MOTIVATIONAL_QUOTES = [
     "Каждый день — это новая возможность стать лучше. 🌟",
@@ -202,6 +204,23 @@ async def notify_admin(context, user_name, username, user_text, reply):
     except Exception as e:
         logging.error(f"Ошибка дублирования: {e}")
 
+async def get_timezone_by_city(city):
+    try:
+        async with httpx.AsyncClient(timeout=10) as client:
+            response = await client.get(
+                "https://api.openweathermap.org/data/2.5/weather",
+                params={"q": city, "appid": WEATHER_API_KEY}
+            )
+        data = response.json()
+        if data.get("cod") != 200:
+            return "Europe/Moscow"
+        lat = data["coord"]["lat"]
+        lon = data["coord"]["lon"]
+        timezone = tf.timezone_at(lat=lat, lng=lon)
+        return timezone or "Europe/Moscow"
+    except:
+        return "Europe/Moscow"
+
 async def get_weather(city):
     try:
         async with httpx.AsyncClient(timeout=10) as client:
@@ -311,23 +330,18 @@ async def send_morning_plan(context: ContextTypes.DEFAULT_TYPE):
     name = user["name"]
     city = user.get("city") or "Москва"
     reminders = await get_reminders(user_id)
-
     text = f"☀️ Доброе утро, {name}!\n\n"
-
     if user.get("morning_motivation"):
         quote = random.choice(MOTIVATIONAL_QUOTES)
         text += f"💫 *Мотивация дня:*\n{quote}\n\n"
-
     if user.get("morning_weather"):
         weather = await get_weather(city)
         text += f"{weather}\n\n"
-
     if reminders:
         plan_text = "\n".join([f"🕐 {r['time']} — {r['text']}" for r in sorted(reminders, key=lambda x: x["time"])])
         text += f"📋 *Ваш план на сегодня:*\n\n{plan_text}"
     else:
         text += "📋 На сегодня задачи не добавлены."
-
     await context.bot.send_message(chat_id=user_id, text=text, parse_mode="Markdown")
 
 def get_main_menu():
@@ -366,7 +380,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if query.data == "menu_morning":
         keyboard = [
             [InlineKeyboardButton("📋 План на день", callback_data="morning_plan")],
-            [InlineKeyboardButton("🌤️ Погода", callback_data="morning_weather")],
+            [InlineKeyboardButton("🌤️ Погода", callback_data="morning_weather_btn")],
             [InlineKeyboardButton("🧘 Мотивация", callback_data="morning_motivation")],
             [InlineKeyboardButton("◀️ Назад", callback_data="back_main")],
         ]
@@ -386,7 +400,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         keyboard = [[InlineKeyboardButton("◀️ Назад", callback_data="menu_morning")]]
         await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="Markdown")
 
-    elif query.data == "morning_weather":
+    elif query.data == "morning_weather_btn":
         await query.edit_message_text(f"🌤️ Получаю погоду для {city}...")
         weather = await get_weather(city)
         keyboard = [[InlineKeyboardButton("◀️ Назад", callback_data="menu_morning")]]
@@ -640,27 +654,10 @@ async def ask_name(update: Update, context: ContextTypes.DEFAULT_TYPE):
     name = update.message.text.strip()
     username = update.effective_user.username or "нет username"
     await save_user(user_id, name=name, username=username)
-    keyboard = [["🇷🇺 Москва (UTC+3)", "🇰🇿 Алматы (UTC+5)"],
-                ["🇺🇦 Киев (UTC+2)", "Другой"]]
+    await notify_admin(context, update.effective_user.first_name or "?", username, f"Представился: {name}", "Онбординг")
     await update.message.reply_text(
         f"Очень приятно, {name}! 😊\n\n"
-        "Укажите ваш часовой пояс — это нужно для точных напоминаний.",
-        reply_markup=ReplyKeyboardMarkup(keyboard, one_time_keyboard=True, resize_keyboard=True)
-    )
-    return ASK_TIMEZONE
-
-async def ask_timezone(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id
-    text = update.message.text
-    tz_map = {
-        "🇷🇺 Москва (UTC+3)": "Europe/Moscow",
-        "🇰🇿 Алматы (UTC+5)": "Asia/Almaty",
-        "🇺🇦 Киев (UTC+2)": "Europe/Kiev",
-    }
-    tz = tz_map.get(text, "Europe/Moscow")
-    await save_user(user_id, timezone=tz)
-    await update.message.reply_text(
-        "🌍 В каком городе вы находитесь?\n\nЭто нужно для точной погоды.\n\nНапример: Москва, Алматы, Киев",
+        "🌍 В каком городе вы находитесь?\n\nНапример: Москва, Алматы, Киев, Дубай",
         reply_markup=ReplyKeyboardRemove()
     )
     return ASK_CITY
@@ -668,7 +665,8 @@ async def ask_timezone(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def ask_city(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     city = update.message.text.strip()
-    await save_user(user_id, city=city)
+    timezone = await get_timezone_by_city(city)
+    await save_user(user_id, city=city, timezone=timezone)
     keyboard = [["✅ Да, каждое утро", "❌ Нет, не нужно"]]
     await update.message.reply_text(
         f"Отлично! Запомнила — {city} 🌍\n\n"
@@ -768,7 +766,8 @@ async def process_text_message(update: Update, context: ContextTypes.DEFAULT_TYP
 
     if context.user_data.get("waiting_city"):
         context.user_data["waiting_city"] = False
-        await save_user(user_id, city=user_text)
+        timezone = await get_timezone_by_city(user_text)
+        await save_user(user_id, city=user_text, timezone=timezone)
         await update.message.reply_text(f"🌍 Город изменён на *{user_text}*!", parse_mode="Markdown")
         return
 
@@ -890,7 +889,6 @@ if __name__ == "__main__":
         entry_points=[CommandHandler("start", start)],
         states={
             ASK_NAME: [MessageHandler(filters.TEXT & ~filters.COMMAND, ask_name)],
-            ASK_TIMEZONE: [MessageHandler(filters.TEXT & ~filters.COMMAND, ask_timezone)],
             ASK_CITY: [MessageHandler(filters.TEXT & ~filters.COMMAND, ask_city)],
             ASK_MORNING_PLAN: [MessageHandler(filters.TEXT & ~filters.COMMAND, ask_morning_plan)],
             ASK_MORNING_TIME: [MessageHandler(filters.TEXT & ~filters.COMMAND, ask_morning_time)],
