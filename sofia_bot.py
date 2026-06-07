@@ -459,7 +459,6 @@ async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if not user_text:
             await update.message.reply_text("Не смогла распознать голосовое сообщение. Попробуйте ещё раз.")
             return
-        await update.message.reply_text(f"🎤 Распознала: _{user_text}_", parse_mode="Markdown")
         await process_text_message(update, context, user_text)
     except Exception as e:
         logging.error(f"Ошибка голосового: {e}")
