@@ -121,6 +121,33 @@ async def init_db():
                 logged_at TIMESTAMP DEFAULT NOW()
             )
         """)
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS expenses (
+                id SERIAL PRIMARY KEY,
+                user_id BIGINT,
+                amount FLOAT,
+                category TEXT,
+                description TEXT,
+                created_at TIMESTAMP DEFAULT NOW()
+            )
+        """)
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS sleep_logs (
+                id SERIAL PRIMARY KEY,
+                user_id BIGINT,
+                bedtime TEXT,
+                wake_time TEXT,
+                created_at TIMESTAMP DEFAULT NOW()
+            )
+        """)
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS notes (
+                id SERIAL PRIMARY KEY,
+                user_id BIGINT,
+                text TEXT,
+                created_at TIMESTAMP DEFAULT NOW()
+            )
+        """)
         for col, definition in [
             ("city", "TEXT DEFAULT 'Москва'"),
             ("water_reminders", "BOOLEAN DEFAULT FALSE"),
@@ -241,16 +268,76 @@ async def get_weather(city):
         desc = data["weather"][0]["description"]
         humidity = data["main"]["humidity"]
         wind = data["wind"]["speed"]
+        advice = ""
+        if temp < 0:
+            advice = "🧥 Оденьтесь тепло, на улице мороз!"
+        elif temp < 10:
+            advice = "🧣 Возьмите куртку и шарф."
+        elif temp < 18:
+            advice = "👕 Лёгкая куртка будет в самый раз."
+        else:
+            advice = "☀️ Отличная погода для прогулки!"
+        if "дождь" in desc or "ливень" in desc:
+            advice += " ☂️ Не забудьте зонт!"
         return (
             f"🌤️ Погода в {city}:\n\n"
-            f"🌡️ Температура: {temp}°C (ощущается как {feels}°C)\n"
+            f"🌡️ {temp}°C (ощущается как {feels}°C)\n"
             f"☁️ {desc.capitalize()}\n"
             f"💧 Влажность: {humidity}%\n"
-            f"💨 Ветер: {wind} м/с"
+            f"💨 Ветер: {wind} м/с\n\n"
+            f"{advice}"
         )
     except Exception as e:
         logging.error(f"Ошибка погоды: {e}")
         return "Не удалось получить данные о погоде."
+
+def calculate_sleep_times(wake_hour, wake_minute):
+    total_minutes = wake_hour * 60 + wake_minute
+    times = []
+    for cycles in [6, 5, 4]:
+        sleep_minutes = total_minutes - cycles * 90 - 15
+        if sleep_minutes < 0:
+            sleep_minutes += 24 * 60
+        h = sleep_minutes // 60
+        m = sleep_minutes % 60
+        times.append(f"{h:02d}:{m:02d} ({cycles} цикла = {cycles * 1.5:.0f}ч сна)")
+    return times
+
+async def get_ai_recipe():
+    try:
+        response = groq_client.chat.completions.create(
+            model="llama-3.3-70b-versatile",
+            messages=[
+                {
+                    "role": "system",
+                    "content": "Ты кулинарный помощник. Предложи один простой рецепт блюда. Напиши название, список ингредиентов и краткий способ приготовления. Пиши по-русски, коротко и понятно."
+                },
+                {"role": "user", "content": "Предложи мне рецепт на сегодня"}
+            ],
+            max_tokens=500,
+            temperature=0.9
+        )
+        return response.choices[0].message.content
+    except:
+        return "Не удалось получить рецепт. Попробуйте позже."
+
+async def get_ai_movie():
+    try:
+        response = groq_client.chat.completions.create(
+            model="llama-3.3-70b-versatile",
+            messages=[
+                {
+                    "role": "system",
+                    "content": "Ты кинокритик. Посоветуй один фильм или сериал для вечернего просмотра. Напиши название, жанр, краткое описание и почему стоит посмотреть. Пиши по-русски."
+                },
+                {"role": "user", "content": "Что посмотреть сегодня вечером?"}
+            ],
+            max_tokens=300,
+            temperature=0.9
+        )
+        return response.choices[0].message.content
+    except:
+        return "Не удалось получить рекомендацию. Попробуйте позже."
 
 async def rephrase_reminder(text):
     try:
@@ -349,8 +436,9 @@ def get_main_menu():
         [InlineKeyboardButton("🌅 Утро", callback_data="menu_morning"),
          InlineKeyboardButton("💪 Привычки", callback_data="menu_habits")],
         [InlineKeyboardButton("💧 Вода", callback_data="menu_water"),
-         InlineKeyboardButton("👤 Профиль", callback_data="menu_profile")],
-        [InlineKeyboardButton("⚙️ Настройки", callback_data="menu_settings")],
+         InlineKeyboardButton("📒 Дневник", callback_data="menu_diary")],
+        [InlineKeyboardButton("👤 Профиль", callback_data="menu_profile"),
+         InlineKeyboardButton("⚙️ Настройки", callback_data="menu_settings")],
     ]
     return InlineKeyboardMarkup(keyboard)
 
@@ -385,7 +473,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             [InlineKeyboardButton("◀️ Назад", callback_data="back_main")],
         ]
         await query.edit_message_text(
-            "🌅 *Утреннее меню*\n\nВыберите что вас интересует:",
+            "🌅 *Утреннее меню*",
             reply_markup=InlineKeyboardMarkup(keyboard),
             parse_mode="Markdown"
         )
@@ -438,9 +526,8 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         context.user_data["waiting_habit"] = True
         keyboard = [[InlineKeyboardButton("◀️ Отмена", callback_data="menu_habits")]]
         await query.edit_message_text(
-            "➕ *Добавить привычку*\n\nНапишите название привычки\n\nНапример: Медитация, Чтение, Зарядка",
-            reply_markup=InlineKeyboardMarkup(keyboard),
-            parse_mode="Markdown"
+            "➕ Напишите название привычки\n\nНапример: Медитация, Чтение, Зарядка",
+            reply_markup=InlineKeyboardMarkup(keyboard)
         )
 
     elif query.data == "habit_log":
@@ -448,29 +535,20 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             habits = await conn.fetch("SELECT id, name FROM habits WHERE user_id = $1", user_id)
         if not habits:
             keyboard = [[InlineKeyboardButton("◀️ Назад", callback_data="menu_habits")]]
-            await query.edit_message_text(
-                "У вас нет привычек. Сначала добавьте привычку!",
-                reply_markup=InlineKeyboardMarkup(keyboard)
-            )
+            await query.edit_message_text("Сначала добавьте привычку!", reply_markup=InlineKeyboardMarkup(keyboard))
             return
         keyboard = [[InlineKeyboardButton(f"✅ {h['name']}", callback_data=f"log_habit_{h['id']}")] for h in habits]
         keyboard.append([InlineKeyboardButton("◀️ Назад", callback_data="menu_habits")])
-        await query.edit_message_text(
-            "✅ Какую привычку отмечаем?",
-            reply_markup=InlineKeyboardMarkup(keyboard)
-        )
+        await query.edit_message_text("✅ Какую привычку отмечаем?", reply_markup=InlineKeyboardMarkup(keyboard))
 
     elif query.data.startswith("log_habit_"):
         habit_id = int(query.data.split("_")[-1])
         async with db_pool.acquire() as conn:
             habit = await conn.fetchrow("SELECT name FROM habits WHERE id = $1", habit_id)
-            await conn.execute(
-                "INSERT INTO habit_logs (user_id, habit_id) VALUES ($1, $2)",
-                user_id, habit_id
-            )
+            await conn.execute("INSERT INTO habit_logs (user_id, habit_id) VALUES ($1, $2)", user_id, habit_id)
         keyboard = [[InlineKeyboardButton("◀️ К привычкам", callback_data="menu_habits")]]
         await query.edit_message_text(
-            f"🎉 Отлично! Привычка *{habit['name']}* отмечена!\n\nТак держать! 💪",
+            f"🎉 Привычка *{habit['name']}* отмечена! Так держать! 💪",
             reply_markup=InlineKeyboardMarkup(keyboard),
             parse_mode="Markdown"
         )
@@ -484,8 +562,8 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                     "SELECT COUNT(*) FROM habit_logs WHERE habit_id = $1 AND logged_at >= NOW() - INTERVAL '7 days'",
                     h["id"]
                 )
-                lines.append(f"📊 {h['name']}: {count}/7 дней на этой неделе")
-        text = "📊 *Статистика привычек за 7 дней:*\n\n" + "\n".join(lines) if lines else "Нет данных."
+                lines.append(f"📊 {h['name']}: {count}/7 дней")
+        text = "📊 *Статистика за 7 дней:*\n\n" + "\n".join(lines) if lines else "Нет данных."
         keyboard = [[InlineKeyboardButton("◀️ Назад", callback_data="menu_habits")]]
         await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="Markdown")
 
@@ -494,25 +572,19 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         status = "✅ Включены" if water_on else "❌ Выключены"
         interval = user.get("water_interval", 2)
         keyboard = [
-            [InlineKeyboardButton("💧 Выпил воду сейчас!", callback_data="water_drink")],
-            [InlineKeyboardButton(
-                "🔔 Выключить напоминания" if water_on else "🔔 Включить напоминания",
-                callback_data="water_toggle"
-            )],
+            [InlineKeyboardButton("💧 Выпил воду!", callback_data="water_drink")],
+            [InlineKeyboardButton("🔔 Выключить" if water_on else "🔔 Включить напоминания", callback_data="water_toggle")],
             [InlineKeyboardButton("◀️ Назад", callback_data="back_main")],
         ]
         await query.edit_message_text(
-            f"💧 *Трекер воды*\n\nНапоминания: {status}\nИнтервал: каждые {interval} часа\n\nНорма воды: 8 стаканов в день 🌊",
+            f"💧 *Трекер воды*\n\nНапоминания: {status}\nКаждые {interval} часа\nНорма: 8 стаканов 🌊",
             reply_markup=InlineKeyboardMarkup(keyboard),
             parse_mode="Markdown"
         )
 
     elif query.data == "water_drink":
         keyboard = [[InlineKeyboardButton("◀️ Назад", callback_data="menu_water")]]
-        await query.edit_message_text(
-            "💧 Отлично! Вы выпили стакан воды!\n\nПродолжайте в том же духе! 🌊",
-            reply_markup=InlineKeyboardMarkup(keyboard)
-        )
+        await query.edit_message_text("💧 Отлично! Стакан воды засчитан! 🌊", reply_markup=InlineKeyboardMarkup(keyboard))
 
     elif query.data == "water_toggle":
         water_on = user.get("water_reminders", False)
@@ -521,40 +593,144 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if new_state:
             interval = user.get("water_interval", 2)
             context.application.job_queue.run_repeating(
-                send_water_reminder,
-                interval=interval * 3600,
-                first=interval * 3600,
-                data=user_id,
-                name=f"water_{user_id}"
+                send_water_reminder, interval=interval * 3600,
+                first=interval * 3600, data=user_id, name=f"water_{user_id}"
             )
-            text = f"✅ Напоминания о воде включены!\nБуду напоминать каждые {interval} часа. 💧"
+            text = f"✅ Напоминания включены! Каждые {interval} часа 💧"
         else:
-            jobs = context.application.job_queue.get_jobs_by_name(f"water_{user_id}")
-            for job in jobs:
+            for job in context.application.job_queue.get_jobs_by_name(f"water_{user_id}"):
                 job.schedule_removal()
-            text = "❌ Напоминания о воде выключены."
+            text = "❌ Напоминания выключены."
         keyboard = [[InlineKeyboardButton("◀️ Назад", callback_data="menu_water")]]
         await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard))
+
+    elif query.data == "menu_diary":
+        keyboard = [
+            [InlineKeyboardButton("💰 Расходы", callback_data="diary_expenses"),
+             InlineKeyboardButton("😴 Сон", callback_data="diary_sleep")],
+            [InlineKeyboardButton("📝 Заметки", callback_data="diary_notes"),
+             InlineKeyboardButton("🍳 Рецепты", callback_data="diary_recipe")],
+            [InlineKeyboardButton("🎬 Что посмотреть", callback_data="diary_movie")],
+            [InlineKeyboardButton("◀️ Назад", callback_data="back_main")],
+        ]
+        await query.edit_message_text(
+            "📒 *Дневник*\n\nВыберите раздел:",
+            reply_markup=InlineKeyboardMarkup(keyboard),
+            parse_mode="Markdown"
+        )
+
+    elif query.data == "diary_expenses":
+        async with db_pool.acquire() as conn:
+            total = await conn.fetchval(
+                "SELECT SUM(amount) FROM expenses WHERE user_id = $1 AND created_at >= NOW() - INTERVAL '30 days'",
+                user_id
+            )
+            recent = await conn.fetch(
+                "SELECT amount, category, description FROM expenses WHERE user_id = $1 ORDER BY created_at DESC LIMIT 5",
+                user_id
+            )
+        total_text = f"{total:.0f} руб" if total else "0 руб"
+        lines = [f"• {r['category']}: {r['amount']:.0f} руб — {r['description']}" for r in recent]
+        text = f"💰 *Расходы за месяц: {total_text}*\n\n"
+        text += "\n".join(lines) if lines else "Расходов пока нет."
+        text += "\n\nНапишите расход в формате:\n*500 еда кофе* или *1200 транспорт такси*"
+        keyboard = [[InlineKeyboardButton("◀️ Назад", callback_data="menu_diary")]]
+        context.user_data["waiting_expense"] = True
+        await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="Markdown")
+
+    elif query.data == "diary_sleep":
+        keyboard = [
+            [InlineKeyboardButton("6:00", callback_data="sleep_6_0"),
+             InlineKeyboardButton("7:00", callback_data="sleep_7_0"),
+             InlineKeyboardButton("8:00", callback_data="sleep_8_0")],
+            [InlineKeyboardButton("9:00", callback_data="sleep_9_0"),
+             InlineKeyboardButton("10:00", callback_data="sleep_10_0")],
+            [InlineKeyboardButton("◀️ Назад", callback_data="menu_diary")],
+        ]
+        await query.edit_message_text(
+            "😴 *Трекер сна*\n\nВо сколько хотите проснуться?",
+            reply_markup=InlineKeyboardMarkup(keyboard),
+            parse_mode="Markdown"
+        )
+
+    elif query.data.startswith("sleep_"):
+        parts = query.data.split("_")
+        wake_hour = int(parts[1])
+        wake_minute = int(parts[2])
+        times = calculate_sleep_times(wake_hour, wake_minute)
+        text = f"😴 *Чтобы проснуться в {wake_hour:02d}:{wake_minute:02d} бодрым:*\n\n"
+        text += "Ложитесь спать в:\n"
+        for t in times:
+            text += f"🌙 {t}\n"
+        text += "\n_+15 минут на засыпание уже учтены_"
+        keyboard = [[InlineKeyboardButton("◀️ Назад", callback_data="diary_sleep")]]
+        await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="Markdown")
+
+    elif query.data == "diary_notes":
+        async with db_pool.acquire() as conn:
+            notes = await conn.fetch(
+                "SELECT id, text, created_at FROM notes WHERE user_id = $1 ORDER BY created_at DESC LIMIT 5",
+                user_id
+            )
+        if notes:
+            lines = [f"📝 {n['text'][:50]}{'...' if len(n['text']) > 50 else ''}" for n in notes]
+            text = "📝 *Ваши заметки:*\n\n" + "\n".join(lines)
+        else:
+            text = "📝 *Заметки*\n\nУ вас пока нет заметок."
+        text += "\n\nНапишите заметку и я её сохраню!"
+        context.user_data["waiting_note"] = True
+        keyboard = [[InlineKeyboardButton("◀️ Назад", callback_data="menu_diary")]]
+        await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="Markdown")
+
+    elif query.data == "diary_recipe":
+        await query.edit_message_text("🍳 Подбираю рецепт...")
+        recipe = await get_ai_recipe()
+        keyboard = [
+            [InlineKeyboardButton("🔄 Другой рецепт", callback_data="diary_recipe")],
+            [InlineKeyboardButton("◀️ Назад", callback_data="menu_diary")],
+        ]
+        await query.edit_message_text(
+            f"🍳 *Рецепт дня:*\n\n{recipe}",
+            reply_markup=InlineKeyboardMarkup(keyboard),
+            parse_mode="Markdown"
+        )
+
+    elif query.data == "diary_movie":
+        await query.edit_message_text("🎬 Подбираю фильм...")
+        movie = await get_ai_movie()
+        keyboard = [
+            [InlineKeyboardButton("🔄 Другой фильм", callback_data="diary_movie")],
+            [InlineKeyboardButton("◀️ Назад", callback_data="menu_diary")],
+        ]
+        await query.edit_message_text(
+            f"🎬 *Рекомендация:*\n\n{movie}",
+            reply_markup=InlineKeyboardMarkup(keyboard),
+            parse_mode="Markdown"
+        )
 
     elif query.data == "menu_profile":
         async with db_pool.acquire() as conn:
             total_messages = await conn.fetchval(
                 "SELECT COUNT(*) FROM history WHERE user_id = $1 AND role = 'user'", user_id
             )
-            habits_count = await conn.fetchval(
-                "SELECT COUNT(*) FROM habits WHERE user_id = $1", user_id
+            habits_count = await conn.fetchval("SELECT COUNT(*) FROM habits WHERE user_id = $1", user_id)
+            expenses_total = await conn.fetchval(
+                "SELECT SUM(amount) FROM expenses WHERE user_id = $1 AND created_at >= NOW() - INTERVAL '30 days'",
+                user_id
             )
         created = user.get("created_at")
         days = (datetime.now() - created).days if created else 0
         tz = user.get("timezone") or "Europe/Moscow"
+        expenses_text = f"{expenses_total:.0f} руб" if expenses_total else "0 руб"
         text = (
             f"👤 *Мой профиль*\n\n"
             f"👋 Имя: {name}\n"
             f"🌍 Город: {city}\n"
             f"🕐 Часовой пояс: {tz}\n"
             f"📅 Дней с нами: {days}\n"
-            f"💬 Сообщений отправлено: {total_messages}\n"
-            f"💪 Привычек отслеживается: {habits_count}"
+            f"💬 Сообщений: {total_messages}\n"
+            f"💪 Привычек: {habits_count}\n"
+            f"💰 Расходы за месяц: {expenses_text}"
         )
         keyboard = [
             [InlineKeyboardButton("🌍 Изменить город", callback_data="profile_city")],
@@ -566,7 +742,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         context.user_data["waiting_city"] = True
         keyboard = [[InlineKeyboardButton("◀️ Отмена", callback_data="menu_profile")]]
         await query.edit_message_text(
-            "🌍 Напишите название вашего города\n\nНапример: Москва, Алматы, Киев",
+            "🌍 Напишите название вашего города",
             reply_markup=InlineKeyboardMarkup(keyboard)
         )
 
@@ -581,7 +757,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             [InlineKeyboardButton("◀️ Назад", callback_data="back_main")],
         ]
         await query.edit_message_text(
-            "⚙️ *Настройки уведомлений*\n\nВключите или выключите что вам нужно:",
+            "⚙️ *Настройки*",
             reply_markup=InlineKeyboardMarkup(keyboard),
             parse_mode="Markdown"
         )
@@ -591,20 +767,14 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await save_user(user_id, morning_weather=new)
         status = "включена ✅" if new else "выключена ❌"
         keyboard = [[InlineKeyboardButton("◀️ Назад", callback_data="menu_settings")]]
-        await query.edit_message_text(
-            f"🌤️ Погода утром {status}",
-            reply_markup=InlineKeyboardMarkup(keyboard)
-        )
+        await query.edit_message_text(f"🌤️ Погода утром {status}", reply_markup=InlineKeyboardMarkup(keyboard))
 
     elif query.data == "toggle_morning_motivation":
         new = not user.get("morning_motivation", False)
         await save_user(user_id, morning_motivation=new)
         status = "включена ✅" if new else "выключена ❌"
         keyboard = [[InlineKeyboardButton("◀️ Назад", callback_data="menu_settings")]]
-        await query.edit_message_text(
-            f"🧘 Мотивация утром {status}",
-            reply_markup=InlineKeyboardMarkup(keyboard)
-        )
+        await query.edit_message_text(f"🧘 Мотивация утром {status}", reply_markup=InlineKeyboardMarkup(keyboard))
 
     elif query.data == "back_main":
         await query.edit_message_text(
@@ -619,21 +789,20 @@ async def announce(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text("У вас нет доступа к этой команде.")
         return
     if not context.args:
-        await update.message.reply_text("Пример:\n/announce Привет! У Софии новые функции 🎉")
+        await update.message.reply_text("Пример:\n/announce Текст")
         return
     text = " ".join(context.args)
     all_users = await get_all_users()
     sent = 0
     failed = 0
-    await update.message.reply_text(f"Начинаю рассылку для {len(all_users)} пользователей...")
+    await update.message.reply_text(f"Рассылка для {len(all_users)} пользователей...")
     for uid in all_users:
         try:
             await context.bot.send_message(chat_id=uid, text=f"📢 {text}")
             sent += 1
-        except Exception as e:
-            logging.error(f"Не удалось отправить {uid}: {e}")
+        except:
             failed += 1
-    await update.message.reply_text(f"Рассылка завершена!\n\n✅ Отправлено: {sent}\n❌ Не доставлено: {failed}")
+    await update.message.reply_text(f"✅ Отправлено: {sent}\n❌ Не доставлено: {failed}")
 
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
@@ -657,7 +826,7 @@ async def ask_name(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await notify_admin(context, update.effective_user.first_name or "?", username, f"Представился: {name}", "Онбординг")
     await update.message.reply_text(
         f"Очень приятно, {name}! 😊\n\n"
-        "🌍 В каком городе вы находитесь?\n\nНапример: Москва, Алматы, Киев, Дубай",
+        "🌍 В каком городе вы находитесь?\n\nНапример: Москва, Алматы, Дубай",
         reply_markup=ReplyKeyboardRemove()
     )
     return ASK_CITY
@@ -670,7 +839,7 @@ async def ask_city(update: Update, context: ContextTypes.DEFAULT_TYPE):
     keyboard = [["✅ Да, каждое утро", "❌ Нет, не нужно"]]
     await update.message.reply_text(
         f"Отлично! Запомнила — {city} 🌍\n\n"
-        "Хотите, чтобы я каждое утро присылала план дня? 📋",
+        "Хотите чтобы я каждое утро присылала план дня? 📋",
         reply_markup=ReplyKeyboardMarkup(keyboard, one_time_keyboard=True, resize_keyboard=True)
     )
     return ASK_MORNING_PLAN
@@ -703,7 +872,7 @@ async def ask_morning_time(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def ask_reminders_step(update: Update, context: ContextTypes.DEFAULT_TYPE):
     keyboard = [["✅ За час", "⏰ За 30 минут", "❌ Не нужно"]]
     await update.message.reply_text(
-        "Напоминать о запланированных делах заранее? 🙂",
+        "Напоминать о делах заранее? 🙂",
         reply_markup=ReplyKeyboardMarkup(keyboard, one_time_keyboard=True, resize_keyboard=True)
     )
     return ASK_REMINDERS
@@ -724,10 +893,10 @@ async def finish_onboarding(update: Update, context: ContextTypes.DEFAULT_TYPE):
     has_plan = user["morning_plan"] if user else False
     summary = f"Всё готово, {name}! 🌸\n\nЯ запомнила:\n"
     if has_plan:
-        summary += f"\n📋 Утренний план — каждый день в {morning_time}"
+        summary += f"\n📋 Утренний план в {morning_time}"
     if reminder_before > 0:
-        summary += f"\n⏰ Напоминания — за {reminder_before} минут до события"
-    summary += "\n\nМожете начинать! Напишите /menu чтобы открыть меню 🌸"
+        summary += f"\n⏰ Напоминания за {reminder_before} минут"
+    summary += "\n\nНапишите /menu чтобы открыть меню 🌸"
     await update.message.reply_text(summary, reply_markup=ReplyKeyboardRemove())
     username = update.effective_user.username or "нет username"
     await notify_admin(context, name, username, "Завершил онбординг", summary)
@@ -754,14 +923,8 @@ async def process_text_message(update: Update, context: ContextTypes.DEFAULT_TYP
     if context.user_data.get("waiting_habit"):
         context.user_data["waiting_habit"] = False
         async with db_pool.acquire() as conn:
-            await conn.execute(
-                "INSERT INTO habits (user_id, name) VALUES ($1, $2)",
-                user_id, user_text
-            )
-        await update.message.reply_text(
-            f"✅ Привычка *{user_text}* добавлена!\n\nОткройте /menu → Привычки чтобы отмечать выполнение.",
-            parse_mode="Markdown"
-        )
+            await conn.execute("INSERT INTO habits (user_id, name) VALUES ($1, $2)", user_id, user_text)
+        await update.message.reply_text(f"✅ Привычка *{user_text}* добавлена!", parse_mode="Markdown")
         return
 
     if context.user_data.get("waiting_city"):
@@ -769,6 +932,30 @@ async def process_text_message(update: Update, context: ContextTypes.DEFAULT_TYP
         timezone = await get_timezone_by_city(user_text)
         await save_user(user_id, city=user_text, timezone=timezone)
         await update.message.reply_text(f"🌍 Город изменён на *{user_text}*!", parse_mode="Markdown")
+        return
+
+    if context.user_data.get("waiting_note"):
+        context.user_data["waiting_note"] = False
+        async with db_pool.acquire() as conn:
+            await conn.execute("INSERT INTO notes (user_id, text) VALUES ($1, $2)", user_id, user_text)
+        await update.message.reply_text("📝 Заметка сохранена!", parse_mode="Markdown")
+        return
+
+    if context.user_data.get("waiting_expense"):
+        context.user_data["waiting_expense"] = False
+        parts = user_text.split()
+        try:
+            amount = float(parts[0])
+            category = parts[1] if len(parts) > 1 else "Другое"
+            description = " ".join(parts[2:]) if len(parts) > 2 else ""
+            async with db_pool.acquire() as conn:
+                await conn.execute(
+                    "INSERT INTO expenses (user_id, amount, category, description) VALUES ($1, $2, $3, $4)",
+                    user_id, amount, category, description
+                )
+            await update.message.reply_text(f"💰 Расход *{amount:.0f} руб* ({category}) сохранён!", parse_mode="Markdown")
+        except:
+            await update.message.reply_text("Не понял формат. Напишите так: *500 еда кофе*", parse_mode="Markdown")
         return
 
     await add_history(user_id, "user", user_text)
@@ -799,13 +986,11 @@ async def process_text_message(update: Update, context: ContextTypes.DEFAULT_TYP
                     time_str = f"{hour:02d}:{minute:02d}"
                     conflict = await check_conflict_db(user_id, time_str)
                     if conflict:
-                        conflict_msg = f"⚠️ {name}, в {time_str} у вас уже запланировано:\n\n«{conflict}»\n\nВыбрать другое время?"
+                        conflict_msg = f"⚠️ {name}, в {time_str} уже запланировано:\n\n«{conflict}»\n\nВыбрать другое время?"
                         await update.message.reply_text(conflict_msg)
-                        await notify_admin(context, user_name, username, user_text, conflict_msg)
                         return
                     job_name = f"reminder_{user_id}_{hour}_{minute}"
-                    old_jobs = context.application.job_queue.get_jobs_by_name(job_name)
-                    for job in old_jobs:
+                    for job in context.application.job_queue.get_jobs_by_name(job_name):
                         job.schedule_removal()
                     context.application.job_queue.run_daily(
                         send_scheduled_reminder,
@@ -827,7 +1012,7 @@ async def process_text_message(update: Update, context: ContextTypes.DEFAULT_TYP
         await notify_admin(context, user_name, username, user_text, reply)
     except Exception as e:
         logging.error(f"Ошибка: {e}")
-        await update.message.reply_text("Прошу прощения, произошла техническая ошибка. Попробуйте ещё раз.")
+        await update.message.reply_text("Прошу прощения, техническая ошибка. Попробуйте ещё раз.")
 
 async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
@@ -845,12 +1030,12 @@ async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE):
         user_text = await transcribe_voice(tmp_path)
         os.unlink(tmp_path)
         if not user_text:
-            await update.message.reply_text("Не смогла распознать голосовое сообщение. Попробуйте ещё раз.")
+            await update.message.reply_text("Не смогла распознать. Попробуйте ещё раз.")
             return
         await process_text_message(update, context, user_text)
     except Exception as e:
         logging.error(f"Ошибка голосового: {e}")
-        await update.message.reply_text("Не удалось обработать голосовое сообщение. Попробуйте написать текстом.")
+        await update.message.reply_text("Не удалось обработать голосовое. Попробуйте написать текстом.")
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await process_text_message(update, context, update.message.text)
@@ -864,7 +1049,7 @@ async def clear(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     if user_id != ADMIN_ID:
-        await update.message.reply_text("У вас нет доступа к этой команде.")
+        await update.message.reply_text("Нет доступа.")
         return
     async with db_pool.acquire() as conn:
         total = await conn.fetchval("SELECT COUNT(*) FROM users WHERE onboarded = TRUE")
@@ -873,10 +1058,10 @@ async def stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
         total_messages = await conn.fetchval("SELECT COUNT(*) FROM history WHERE role = 'user'")
     text = (
         "📊 *Статистика Софии*\n\n"
-        f"👥 Всего пользователей: *{total}*\n"
-        f"🟢 Активных сегодня: *{today}*\n"
-        f"📅 Активных за 7 дней: *{week}*\n"
-        f"💬 Всего сообщений: *{total_messages}*"
+        f"👥 Всего: *{total}*\n"
+        f"🟢 Сегодня: *{today}*\n"
+        f"📅 За 7 дней: *{week}*\n"
+        f"💬 Сообщений: *{total_messages}*"
     )
     await update.message.reply_text(text, parse_mode="Markdown")
 
