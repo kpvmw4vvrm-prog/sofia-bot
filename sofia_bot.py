@@ -19,7 +19,6 @@ TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
 GROQ_API_KEY = os.environ.get("GROQ_API_KEY")
 ASSEMBLYAI_KEY = os.environ.get("ASSEMBLYAI_KEY")
 WEATHER_API_KEY = os.environ.get("WEATHER_API_KEY")
-NEWS_API_KEY = os.environ.get("NEWS_API_KEY")
 ADMIN_ID = 944447597
 DATABASE_URL = os.environ.get("DATABASE_URL")
 
@@ -27,7 +26,7 @@ logging.basicConfig(level=logging.INFO)
 groq_client = Groq(api_key=GROQ_API_KEY)
 aai.settings.api_key = ASSEMBLYAI_KEY
 
-ASK_NAME, ASK_TIMEZONE, ASK_MORNING_PLAN, ASK_MORNING_TIME, ASK_REMINDERS = range(5)
+ASK_NAME, ASK_TIMEZONE, ASK_CITY, ASK_MORNING_PLAN, ASK_MORNING_TIME, ASK_REMINDERS = range(6)
 
 MOTIVATIONAL_QUOTES = [
     "Каждый день — это новая возможность стать лучше. 🌟",
@@ -82,7 +81,6 @@ async def init_db():
                 city TEXT DEFAULT 'Москва',
                 water_reminders BOOLEAN DEFAULT FALSE,
                 water_interval INTEGER DEFAULT 2,
-                evening_news BOOLEAN DEFAULT FALSE,
                 morning_weather BOOLEAN DEFAULT FALSE,
                 morning_motivation BOOLEAN DEFAULT FALSE
             )
@@ -121,13 +119,10 @@ async def init_db():
                 logged_at TIMESTAMP DEFAULT NOW()
             )
         """)
-
-        # Добавляем новые колонки если их нет
         for col, definition in [
             ("city", "TEXT DEFAULT 'Москва'"),
             ("water_reminders", "BOOLEAN DEFAULT FALSE"),
             ("water_interval", "INTEGER DEFAULT 2"),
-            ("evening_news", "BOOLEAN DEFAULT FALSE"),
             ("morning_weather", "BOOLEAN DEFAULT FALSE"),
             ("morning_motivation", "BOOLEAN DEFAULT FALSE"),
         ]:
@@ -238,35 +233,6 @@ async def get_weather(city):
         logging.error(f"Ошибка погоды: {e}")
         return "Не удалось получить данные о погоде."
 
-async def get_news(topic=None):
-    try:
-        async with httpx.AsyncClient(timeout=10) as client:
-            params = {
-                "apiKey": NEWS_API_KEY,
-                "language": "ru",
-                "pageSize": 5,
-            }
-            if topic:
-                params["q"] = topic
-                url = "https://newsapi.org/v2/everything"
-            else:
-                params["country"] = "ru"
-                url = "https://newsapi.org/v2/top-headlines"
-            response = await client.get(url, params=params)
-        data = response.json()
-        articles = data.get("articles", [])
-        if not articles:
-            return "Новости не найдены."
-        lines = ["📰 *Главные новости:*\n"]
-        for i, article in enumerate(articles[:5], 1):
-            title = article.get("title", "")
-            url = article.get("url", "")
-            lines.append(f"{i}. [{title}]({url})")
-        return "\n".join(lines)
-    except Exception as e:
-        logging.error(f"Ошибка новостей: {e}")
-        return "Не удалось получить новости."
-
 async def rephrase_reminder(text):
     try:
         response = groq_client.chat.completions.create(
@@ -334,7 +300,7 @@ async def send_water_reminder(context: ContextTypes.DEFAULT_TYPE):
     name = user["name"] if user else ""
     await context.bot.send_message(
         chat_id=user_id,
-        text=f"💧 {name}, не забудьте выпить стакан воды! Это важно для вашего здоровья. 🌊"
+        text=f"💧 {name}, не забудьте выпить стакан воды! 🌊"
     )
 
 async def send_morning_plan(context: ContextTypes.DEFAULT_TYPE):
@@ -344,7 +310,6 @@ async def send_morning_plan(context: ContextTypes.DEFAULT_TYPE):
         return
     name = user["name"]
     city = user.get("city") or "Москва"
-    tz = pytz.timezone(user["timezone"] if user["timezone"] else "Europe/Moscow")
     reminders = await get_reminders(user_id)
 
     text = f"☀️ Доброе утро, {name}!\n\n"
@@ -365,28 +330,13 @@ async def send_morning_plan(context: ContextTypes.DEFAULT_TYPE):
 
     await context.bot.send_message(chat_id=user_id, text=text, parse_mode="Markdown")
 
-async def send_evening_news(context: ContextTypes.DEFAULT_TYPE):
-    user_id = context.job.data
-    user = await get_user(user_id)
-    if not user:
-        return
-    name = user["name"]
-    news = await get_news()
-    await context.bot.send_message(
-        chat_id=user_id,
-        text=f"🌙 Добрый вечер, {name}!\n\nВот главные новости дня:\n\n{news}",
-        parse_mode="Markdown",
-        disable_web_page_preview=True
-    )
-
 def get_main_menu():
     keyboard = [
         [InlineKeyboardButton("🌅 Утро", callback_data="menu_morning"),
-         InlineKeyboardButton("📰 Новости", callback_data="menu_news")],
-        [InlineKeyboardButton("💪 Привычки", callback_data="menu_habits"),
-         InlineKeyboardButton("💧 Вода", callback_data="menu_water")],
-        [InlineKeyboardButton("👤 Профиль", callback_data="menu_profile"),
-         InlineKeyboardButton("⚙️ Настройки", callback_data="menu_settings")],
+         InlineKeyboardButton("💪 Привычки", callback_data="menu_habits")],
+        [InlineKeyboardButton("💧 Вода", callback_data="menu_water"),
+         InlineKeyboardButton("👤 Профиль", callback_data="menu_profile")],
+        [InlineKeyboardButton("⚙️ Настройки", callback_data="menu_settings")],
     ]
     return InlineKeyboardMarkup(keyboard)
 
@@ -437,7 +387,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="Markdown")
 
     elif query.data == "morning_weather":
-        await query.edit_message_text("🌤️ Получаю погоду...")
+        await query.edit_message_text(f"🌤️ Получаю погоду для {city}...")
         weather = await get_weather(city)
         keyboard = [[InlineKeyboardButton("◀️ Назад", callback_data="menu_morning")]]
         await query.edit_message_text(weather, reply_markup=InlineKeyboardMarkup(keyboard))
@@ -452,37 +402,6 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"🧘 *Мотивация дня:*\n\n{quote}",
             reply_markup=InlineKeyboardMarkup(keyboard),
             parse_mode="Markdown"
-        )
-
-    elif query.data == "menu_news":
-        keyboard = [
-            [InlineKeyboardButton("📰 Главные новости", callback_data="news_top")],
-            [InlineKeyboardButton("🔍 Новости по теме", callback_data="news_topic")],
-            [InlineKeyboardButton("◀️ Назад", callback_data="back_main")],
-        ]
-        await query.edit_message_text(
-            "📰 *Новости*\n\nВыберите тип новостей:",
-            reply_markup=InlineKeyboardMarkup(keyboard),
-            parse_mode="Markdown"
-        )
-
-    elif query.data == "news_top":
-        await query.edit_message_text("📰 Загружаю новости...")
-        news = await get_news()
-        keyboard = [[InlineKeyboardButton("◀️ Назад", callback_data="menu_news")]]
-        await query.edit_message_text(
-            news,
-            reply_markup=InlineKeyboardMarkup(keyboard),
-            parse_mode="Markdown",
-            disable_web_page_preview=True
-        )
-
-    elif query.data == "news_topic":
-        context.user_data["waiting_news_topic"] = True
-        keyboard = [[InlineKeyboardButton("◀️ Отмена", callback_data="menu_news")]]
-        await query.edit_message_text(
-            "🔍 Напишите тему для поиска новостей\n\nНапример: спорт, технологии, бизнес",
-            reply_markup=InlineKeyboardMarkup(keyboard)
         )
 
     elif query.data == "menu_habits":
@@ -587,7 +506,6 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await save_user(user_id, water_reminders=new_state)
         if new_state:
             interval = user.get("water_interval", 2)
-            tz = pytz.timezone(user["timezone"] if user["timezone"] else "Europe/Moscow")
             context.application.job_queue.run_repeating(
                 send_water_reminder,
                 interval=interval * 3600,
@@ -614,7 +532,6 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             )
         created = user.get("created_at")
         days = (datetime.now() - created).days if created else 0
-        city = user.get("city") or "Не указан"
         tz = user.get("timezone") or "Europe/Moscow"
         text = (
             f"👤 *Мой профиль*\n\n"
@@ -635,19 +552,17 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         context.user_data["waiting_city"] = True
         keyboard = [[InlineKeyboardButton("◀️ Отмена", callback_data="menu_profile")]]
         await query.edit_message_text(
-            "🌍 Напишите название вашего города для погоды\n\nНапример: Москва, Алматы, Киев",
+            "🌍 Напишите название вашего города\n\nНапример: Москва, Алматы, Киев",
             reply_markup=InlineKeyboardMarkup(keyboard)
         )
 
     elif query.data == "menu_settings":
         morning_weather = "✅" if user.get("morning_weather") else "❌"
         morning_motivation = "✅" if user.get("morning_motivation") else "❌"
-        evening_news = "✅" if user.get("evening_news") else "❌"
         water = "✅" if user.get("water_reminders") else "❌"
         keyboard = [
             [InlineKeyboardButton(f"{morning_weather} Погода утром", callback_data="toggle_morning_weather")],
             [InlineKeyboardButton(f"{morning_motivation} Мотивация утром", callback_data="toggle_morning_motivation")],
-            [InlineKeyboardButton(f"{evening_news} Новости вечером", callback_data="toggle_evening_news")],
             [InlineKeyboardButton(f"{water} Напоминания о воде", callback_data="water_toggle")],
             [InlineKeyboardButton("◀️ Назад", callback_data="back_main")],
         ]
@@ -676,26 +591,6 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             f"🧘 Мотивация утром {status}",
             reply_markup=InlineKeyboardMarkup(keyboard)
         )
-
-    elif query.data == "toggle_evening_news":
-        new = not user.get("evening_news", False)
-        await save_user(user_id, evening_news=new)
-        if new:
-            tz = pytz.timezone(user["timezone"] if user["timezone"] else "Europe/Moscow")
-            context.application.job_queue.run_daily(
-                send_evening_news,
-                time=time(hour=20, minute=0, tzinfo=tz),
-                data=user_id,
-                name=f"evening_news_{user_id}"
-            )
-            text = "📰 Вечерние новости включены ✅\nБуду присылать в 20:00"
-        else:
-            jobs = context.application.job_queue.get_jobs_by_name(f"evening_news_{user_id}")
-            for job in jobs:
-                job.schedule_removal()
-            text = "📰 Вечерние новости выключены ❌"
-        keyboard = [[InlineKeyboardButton("◀️ Назад", callback_data="menu_settings")]]
-        await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard))
 
     elif query.data == "back_main":
         await query.edit_message_text(
@@ -745,7 +640,6 @@ async def ask_name(update: Update, context: ContextTypes.DEFAULT_TYPE):
     name = update.message.text.strip()
     username = update.effective_user.username or "нет username"
     await save_user(user_id, name=name, username=username)
-    await notify_admin(context, update.effective_user.first_name or "?", username, f"Представился: {name}", "Онбординг")
     keyboard = [["🇷🇺 Москва (UTC+3)", "🇰🇿 Алматы (UTC+5)"],
                 ["🇺🇦 Киев (UTC+2)", "Другой"]]
     await update.message.reply_text(
@@ -765,8 +659,19 @@ async def ask_timezone(update: Update, context: ContextTypes.DEFAULT_TYPE):
     }
     tz = tz_map.get(text, "Europe/Moscow")
     await save_user(user_id, timezone=tz)
+    await update.message.reply_text(
+        "🌍 В каком городе вы находитесь?\n\nЭто нужно для точной погоды.\n\nНапример: Москва, Алматы, Киев",
+        reply_markup=ReplyKeyboardRemove()
+    )
+    return ASK_CITY
+
+async def ask_city(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    city = update.message.text.strip()
+    await save_user(user_id, city=city)
     keyboard = [["✅ Да, каждое утро", "❌ Нет, не нужно"]]
     await update.message.reply_text(
+        f"Отлично! Запомнила — {city} 🌍\n\n"
         "Хотите, чтобы я каждое утро присылала план дня? 📋",
         reply_markup=ReplyKeyboardMarkup(keyboard, one_time_keyboard=True, resize_keyboard=True)
     )
@@ -865,13 +770,6 @@ async def process_text_message(update: Update, context: ContextTypes.DEFAULT_TYP
         context.user_data["waiting_city"] = False
         await save_user(user_id, city=user_text)
         await update.message.reply_text(f"🌍 Город изменён на *{user_text}*!", parse_mode="Markdown")
-        return
-
-    if context.user_data.get("waiting_news_topic"):
-        context.user_data["waiting_news_topic"] = False
-        await update.message.reply_text("🔍 Ищу новости...")
-        news = await get_news(topic=user_text)
-        await update.message.reply_text(news, parse_mode="Markdown", disable_web_page_preview=True)
         return
 
     await add_history(user_id, "user", user_text)
@@ -993,6 +891,7 @@ if __name__ == "__main__":
         states={
             ASK_NAME: [MessageHandler(filters.TEXT & ~filters.COMMAND, ask_name)],
             ASK_TIMEZONE: [MessageHandler(filters.TEXT & ~filters.COMMAND, ask_timezone)],
+            ASK_CITY: [MessageHandler(filters.TEXT & ~filters.COMMAND, ask_city)],
             ASK_MORNING_PLAN: [MessageHandler(filters.TEXT & ~filters.COMMAND, ask_morning_plan)],
             ASK_MORNING_TIME: [MessageHandler(filters.TEXT & ~filters.COMMAND, ask_morning_time)],
             ASK_REMINDERS: [MessageHandler(filters.TEXT & ~filters.COMMAND, finish_onboarding)],
