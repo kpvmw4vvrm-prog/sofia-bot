@@ -1378,7 +1378,7 @@ if __name__ == "__main__":
     )
     app.add_handler(conv_handler)
     app.add_handler(CommandHandler("menu", show_menu))
-    app.add_handler(CommandHandler("умею", skills_command))
+    app.add_handler(CommandHandler("skills", skills_command))
     app.add_handler(CommandHandler("skills", skills_command))
     app.add_handler(CommandHandler("announce", announce))
     app.add_handler(CommandHandler("stats", stats))
