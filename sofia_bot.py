@@ -17,14 +17,14 @@ from telegram.ext import (
 from openai import OpenAI
 
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
-GROQ_API_KEY = os.environ.get("GROQ_API_KEY")
+OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY")
 ASSEMBLYAI_KEY = os.environ.get("ASSEMBLYAI_KEY")
 WEATHER_API_KEY = os.environ.get("WEATHER_API_KEY")
 ADMIN_ID = 944447597
 DATABASE_URL = os.environ.get("DATABASE_URL")
 
 logging.basicConfig(level=logging.INFO)
-groq_client = Groq(api_key=GROQ_API_KEY)
+groq_client = OpenAI(api_key=OPENAI_API_KEY, base_url="https://aitunnel.ru/v1")
 aai.settings.api_key = ASSEMBLYAI_KEY
 tf = TimezoneFinder()
 
@@ -487,14 +487,14 @@ def calculate_sleep_times(wake_hour, wake_minute):
             sleep_minutes += 24 * 60
         h = sleep_minutes // 60
         m = sleep_minutes % 60
-        times.append(f"{h:02d}:{m:02d} ({cycles} cycles = {cycles * 1.5:.0f}h)" if False else f"{h:02d}:{m:02d} ({cycles} цикла = {cycles * 1.5:.0f}ч)")
+        times.append(f"{h:02d}:{m:02d} ({cycles} цикла = {cycles * 1.5:.0f}ч)")
     return times
 
 async def get_ai_recipe(lang="ru"):
     try:
         prompt = "Suggest one simple recipe. Write the name, ingredients list and brief cooking method. Be concise." if lang == "en" else "Предложи один простой рецепт блюда. Напиши название, список ингредиентов и краткий способ приготовления. Пиши коротко."
         response = groq_client.chat.completions.create(
-            model="llama-3.3-70b-versatile",
+            model="gpt-4o-mini",
             messages=[{"role": "system", "content": prompt}, {"role": "user", "content": "Recipe please" if lang == "en" else "Предложи рецепт"}],
             max_tokens=500, temperature=0.9
         )
@@ -506,7 +506,7 @@ async def get_ai_movie(lang="ru"):
     try:
         prompt = "Recommend one movie or series for evening viewing. Write the title, genre, brief description and why to watch it." if lang == "en" else "Посоветуй один фильм или сериал для вечернего просмотра. Напиши название, жанр, краткое описание и почему стоит посмотреть."
         response = groq_client.chat.completions.create(
-            model="llama-3.3-70b-versatile",
+            model="gpt-4o-mini",
             messages=[{"role": "system", "content": prompt}, {"role": "user", "content": "Recommend something" if lang == "en" else "Что посмотреть?"}],
             max_tokens=300, temperature=0.9
         )
@@ -518,7 +518,7 @@ async def rephrase_reminder(text, lang="ru"):
     try:
         system = "Rephrase the reminder on behalf of the assistant — briefly, without 'me', without 'remind', without time. Just the essence. Reply with only the rephrased text." if lang == "en" else "Перефразируй напоминание от лица ассистента — коротко, без 'мне', без 'напомни', без времени. Только суть. Отвечай только перефразированным текстом."
         response = groq_client.chat.completions.create(
-            model="llama-3.3-70b-versatile",
+            model="gpt-4o-mini",
             messages=[{"role": "system", "content": system}, {"role": "user", "content": text}],
             max_tokens=100, temperature=0.3
         )
@@ -1286,7 +1286,7 @@ async def process_text_message(update: Update, context: ContextTypes.DEFAULT_TYP
 
         system_prompt = SYSTEM_PROMPT_EN if is_en else SYSTEM_PROMPT_RU
         response = groq_client.chat.completions.create(
-            model="llama-3.3-70b-versatile",
+            model="gpt-4o-mini",
             messages=[{"role": "system", "content": system_prompt}, *history],
             max_tokens=1000, temperature=0.7
         )
