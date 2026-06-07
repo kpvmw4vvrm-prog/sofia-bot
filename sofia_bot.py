@@ -375,38 +375,12 @@ async def finish_onboarding(update: Update, context: ContextTypes.DEFAULT_TYPE):
         )
     return ConversationHandler.END
 
-async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE):
+async def process_text_message(update: Update, context: ContextTypes.DEFAULT_TYPE, user_text: str):
     user_id = update.effective_user.id
     user = await get_user(user_id)
     if not user or not user["onboarded"]:
         await update.message.reply_text("Напишите /start чтобы начать 🌸")
         return
-    await context.bot.send_chat_action(chat_id=update.effective_chat.id, action="typing")
-    try:
-        voice = update.message.voice
-        file = await context.bot.get_file(voice.file_id)
-        with tempfile.NamedTemporaryFile(suffix=".ogg", delete=False) as tmp:
-            tmp_path = tmp.name
-        await file.download_to_drive(tmp_path)
-        user_text = await transcribe_voice(tmp_path)
-        os.unlink(tmp_path)
-        if not user_text:
-            await update.message.reply_text("Не смогла распознать голосовое сообщение. Попробуйте ещё раз.")
-            return
-        await update.message.reply_text(f"🎤 Распознала: _{user_text}_", parse_mode="Markdown")
-        update._message.text = user_text  # noqa
-await handle_message(update, context)
-    except Exception as e:
-        logging.error(f"Ошибка голосового: {e}")
-        await update.message.reply_text("Не удалось обработать голосовое сообщение. Попробуйте написать текстом.")
-
-async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
-    user_id = update.effective_user.id
-    user = await get_user(user_id)
-    if not user or not user["onboarded"]:
-        await update.message.reply_text("Напишите /start чтобы начать 🌸")
-        return
-    user_text = update.message.text
     user_name = update.effective_user.first_name or "Пользователь"
     username = update.effective_user.username or "нет username"
     name = user["name"]
@@ -466,6 +440,33 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     except Exception as e:
         logging.error(f"Ошибка: {e}")
         await update.message.reply_text("Прошу прощения, произошла техническая ошибка. Попробуйте ещё раз.")
+
+async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    user = await get_user(user_id)
+    if not user or not user["onboarded"]:
+        await update.message.reply_text("Напишите /start чтобы начать 🌸")
+        return
+    await context.bot.send_chat_action(chat_id=update.effective_chat.id, action="typing")
+    try:
+        voice = update.message.voice
+        file = await context.bot.get_file(voice.file_id)
+        with tempfile.NamedTemporaryFile(suffix=".ogg", delete=False) as tmp:
+            tmp_path = tmp.name
+        await file.download_to_drive(tmp_path)
+        user_text = await transcribe_voice(tmp_path)
+        os.unlink(tmp_path)
+        if not user_text:
+            await update.message.reply_text("Не смогла распознать голосовое сообщение. Попробуйте ещё раз.")
+            return
+        await update.message.reply_text(f"🎤 Распознала: _{user_text}_", parse_mode="Markdown")
+        await process_text_message(update, context, user_text)
+    except Exception as e:
+        logging.error(f"Ошибка голосового: {e}")
+        await update.message.reply_text("Не удалось обработать голосовое сообщение. Попробуйте написать текстом.")
+
+async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await process_text_message(update, context, update.message.text)
 
 async def clear(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
