@@ -2,12 +2,10 @@ import logging
 import re
 import os
 import tempfile
-import urllib.request
-import json
-import ssl
 from datetime import datetime, time, timedelta
 import pytz
 import asyncpg
+import assemblyai as aai
 from telegram import Update, ReplyKeyboardMarkup, ReplyKeyboardRemove
 from telegram.ext import (
     ApplicationBuilder, CommandHandler, MessageHandler,
@@ -17,11 +15,13 @@ from groq import Groq
 
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
 GROQ_API_KEY = os.environ.get("GROQ_API_KEY")
+ASSEMBLYAI_KEY = os.environ.get("ASSEMBLYAI_KEY")
 ADMIN_ID = 944447597
 DATABASE_URL = os.environ.get("DATABASE_URL")
 
 logging.basicConfig(level=logging.INFO)
 groq_client = Groq(api_key=GROQ_API_KEY)
+aai.settings.api_key = ASSEMBLYAI_KEY
 
 ASK_NAME, ASK_TIMEZONE, ASK_MORNING_PLAN, ASK_MORNING_TIME, ASK_REMINDERS = range(5)
 
@@ -184,32 +184,12 @@ async def rephrase_reminder(text):
         return text
 
 async def transcribe_voice(file_path):
-    with open(file_path, "rb") as f:
-        file_data = f.read()
-    boundary = "----WebKitFormBoundary7MA4YWxkTrZu0gW"
-    body = (
-        f"--{boundary}\r\n"
-        f'Content-Disposition: form-data; name="model"\r\n\r\n'
-        f"whisper-large-v3\r\n"
-        f"--{boundary}\r\n"
-        f'Content-Disposition: form-data; name="language"\r\n\r\n'
-        f"ru\r\n"
-        f"--{boundary}\r\n"
-        f'Content-Disposition: form-data; name="file"; filename="voice.ogg"\r\n'
-        f"Content-Type: audio/ogg\r\n\r\n"
-    ).encode() + file_data + f"\r\n--{boundary}--\r\n".encode()
-    req = urllib.request.Request(
-        "https://api.groq.com/openai/v1/audio/transcriptions",
-        data=body,
-        headers={
-            "Authorization": f"Bearer {GROQ_API_KEY}",
-            "Content-Type": f"multipart/form-data; boundary={boundary}"
-        }
-    )
-    ctx = ssl.create_default_context()
-    with urllib.request.urlopen(req, context=ctx, timeout=30) as resp:
-        result = json.loads(resp.read())
-    return result.get("text", "")
+    transcriber = aai.Transcriber()
+    config = aai.TranscriptionConfig(language_code="ru")
+    transcript = transcriber.transcribe(file_path, config=config)
+    if transcript.status == aai.TranscriptStatus.error:
+        raise Exception(f"Ошибка транскрипции: {transcript.error}")
+    return transcript.text
 
 def extract_exact_time(text):
     time_match = re.search(r'(\d{1,2})[:\.](\d{2})', text)
