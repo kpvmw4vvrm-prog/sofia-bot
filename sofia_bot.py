@@ -2,13 +2,15 @@ import logging
 import re
 import os
 import tempfile
+import httpx
+import random
 from datetime import datetime, time, timedelta
 import pytz
 import asyncpg
 import assemblyai as aai
-from telegram import Update, ReplyKeyboardMarkup, ReplyKeyboardRemove
+from telegram import Update, ReplyKeyboardMarkup, ReplyKeyboardRemove, InlineKeyboardButton, InlineKeyboardMarkup
 from telegram.ext import (
-    ApplicationBuilder, CommandHandler, MessageHandler,
+    ApplicationBuilder, CommandHandler, MessageHandler, CallbackQueryHandler,
     filters, ContextTypes, ConversationHandler
 )
 from groq import Groq
@@ -16,6 +18,8 @@ from groq import Groq
 TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
 GROQ_API_KEY = os.environ.get("GROQ_API_KEY")
 ASSEMBLYAI_KEY = os.environ.get("ASSEMBLYAI_KEY")
+WEATHER_API_KEY = os.environ.get("WEATHER_API_KEY")
+NEWS_API_KEY = os.environ.get("NEWS_API_KEY")
 ADMIN_ID = 944447597
 DATABASE_URL = os.environ.get("DATABASE_URL")
 
@@ -25,25 +29,27 @@ aai.settings.api_key = ASSEMBLYAI_KEY
 
 ASK_NAME, ASK_TIMEZONE, ASK_MORNING_PLAN, ASK_MORNING_TIME, ASK_REMINDERS = range(5)
 
+MOTIVATIONAL_QUOTES = [
+    "Каждый день — это новая возможность стать лучше. 🌟",
+    "Маленькие шаги каждый день приводят к большим результатам. 💪",
+    "Вы способны на большее, чем думаете. 🚀",
+    "Успех — это сумма небольших усилий, повторяемых день за днём. ✨",
+    "Верьте в себя и всё станет возможным. 🌸",
+    "Сегодня — лучший день чтобы начать. 🌅",
+    "Ваши мечты заслуживают вашего труда. 💫",
+    "Каждая трудность — это возможность для роста. 🌱",
+    "Действуйте сейчас, совершенствуйтесь потом. ⚡",
+    "Вы сильнее, чем вы думаете. 🦋",
+]
+
 SYSTEM_PROMPT = """Ты — София, личный ассистент, стратег и умный помощник. Общаешься вежливо и профессионально, обращаешься на "Вы". Деловой стиль, но живой. Умеренно используй эмодзи.
 
 Что ты умеешь:
-
-1. Планирование — составляешь план на день, завтра, неделю, месяц по запросу. Пишешь структурированно, по времени, в столбик.
-
-2. История — помнишь всё что пользователь делал и говорил. Отвечаешь на вопросы типа "что я делала вчера" или "что у меня запланировано на пятницу".
-
-3. Стратегия целей — когда человек называет цель, действуй строго по шагам:
-   Шаг 1 — уточни текущий уровень или ситуацию (если нужно) и дедлайн
-   Шаг 2 — рассчитай сколько часов всего нужно на достижение цели
-   Шаг 3 — раздели на количество дней до дедлайна — получи часы в день
-   Шаг 4 — спроси в какое время удобно заниматься
-   Шаг 5 — составь конкретное расписание и добавь повторяющееся напоминание
-   Шаг 6 — через 7 дней напомни спросить как идут дела и скорректируй план если нужно
-
-4. Напоминания — присылаешь точно в срок. Следишь за конфликтами в расписании.
-
-5. Умный помощник — отвечаешь на любые вопросы как искусственный интеллект.
+1. Планирование — составляешь план на день, завтра, неделю, месяц по запросу.
+2. История — помнишь всё что пользователь делал и говорил.
+3. Стратегия целей — ведёшь по шагам к достижению цели.
+4. Напоминания — присылаешь точно в срок.
+5. Умный помощник — отвечаешь на любые вопросы.
 
 Правила оформления:
 — Списки нумеруй: 1. 2. 3.
@@ -71,7 +77,14 @@ async def init_db():
                 morning_plan BOOLEAN DEFAULT FALSE,
                 morning_time TEXT DEFAULT '08:00',
                 reminder_before INTEGER DEFAULT 60,
-                onboarded BOOLEAN DEFAULT FALSE
+                onboarded BOOLEAN DEFAULT FALSE,
+                created_at TIMESTAMP DEFAULT NOW(),
+                city TEXT DEFAULT 'Москва',
+                water_reminders BOOLEAN DEFAULT FALSE,
+                water_interval INTEGER DEFAULT 2,
+                evening_news BOOLEAN DEFAULT FALSE,
+                morning_weather BOOLEAN DEFAULT FALSE,
+                morning_motivation BOOLEAN DEFAULT FALSE
             )
         """)
         await conn.execute("""
@@ -92,6 +105,36 @@ async def init_db():
                 created_at TIMESTAMP DEFAULT NOW()
             )
         """)
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS habits (
+                id SERIAL PRIMARY KEY,
+                user_id BIGINT,
+                name TEXT,
+                created_at TIMESTAMP DEFAULT NOW()
+            )
+        """)
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS habit_logs (
+                id SERIAL PRIMARY KEY,
+                user_id BIGINT,
+                habit_id INTEGER,
+                logged_at TIMESTAMP DEFAULT NOW()
+            )
+        """)
+
+        # Добавляем новые колонки если их нет
+        for col, definition in [
+            ("city", "TEXT DEFAULT 'Москва'"),
+            ("water_reminders", "BOOLEAN DEFAULT FALSE"),
+            ("water_interval", "INTEGER DEFAULT 2"),
+            ("evening_news", "BOOLEAN DEFAULT FALSE"),
+            ("morning_weather", "BOOLEAN DEFAULT FALSE"),
+            ("morning_motivation", "BOOLEAN DEFAULT FALSE"),
+        ]:
+            try:
+                await conn.execute(f"ALTER TABLE users ADD COLUMN IF NOT EXISTS {col} {definition}")
+            except:
+                pass
 
 async def get_user(user_id):
     async with db_pool.acquire() as conn:
@@ -164,6 +207,66 @@ async def notify_admin(context, user_name, username, user_text, reply):
     except Exception as e:
         logging.error(f"Ошибка дублирования: {e}")
 
+async def get_weather(city):
+    try:
+        async with httpx.AsyncClient(timeout=10) as client:
+            response = await client.get(
+                "https://api.openweathermap.org/data/2.5/weather",
+                params={
+                    "q": city,
+                    "appid": WEATHER_API_KEY,
+                    "units": "metric",
+                    "lang": "ru"
+                }
+            )
+        data = response.json()
+        if data.get("cod") != 200:
+            return f"Не удалось получить погоду для города {city}."
+        temp = round(data["main"]["temp"])
+        feels = round(data["main"]["feels_like"])
+        desc = data["weather"][0]["description"]
+        humidity = data["main"]["humidity"]
+        wind = data["wind"]["speed"]
+        return (
+            f"🌤️ Погода в {city}:\n\n"
+            f"🌡️ Температура: {temp}°C (ощущается как {feels}°C)\n"
+            f"☁️ {desc.capitalize()}\n"
+            f"💧 Влажность: {humidity}%\n"
+            f"💨 Ветер: {wind} м/с"
+        )
+    except Exception as e:
+        logging.error(f"Ошибка погоды: {e}")
+        return "Не удалось получить данные о погоде."
+
+async def get_news(topic=None):
+    try:
+        async with httpx.AsyncClient(timeout=10) as client:
+            params = {
+                "apiKey": NEWS_API_KEY,
+                "language": "ru",
+                "pageSize": 5,
+            }
+            if topic:
+                params["q"] = topic
+                url = "https://newsapi.org/v2/everything"
+            else:
+                params["country"] = "ru"
+                url = "https://newsapi.org/v2/top-headlines"
+            response = await client.get(url, params=params)
+        data = response.json()
+        articles = data.get("articles", [])
+        if not articles:
+            return "Новости не найдены."
+        lines = ["📰 *Главные новости:*\n"]
+        for i, article in enumerate(articles[:5], 1):
+            title = article.get("title", "")
+            url = article.get("url", "")
+            lines.append(f"{i}. [{title}]({url})")
+        return "\n".join(lines)
+    except Exception as e:
+        logging.error(f"Ошибка новостей: {e}")
+        return "Не удалось получить новости."
+
 async def rephrase_reminder(text):
     try:
         response = groq_client.chat.completions.create(
@@ -222,7 +325,16 @@ async def send_scheduled_reminder(context: ContextTypes.DEFAULT_TYPE):
     name = user["name"] if user else ""
     await context.bot.send_message(
         chat_id=user_id,
-        text=f"⏰ {name}, напоминаю!\n\n" + essence
+        text=f"⏰ {name}, напоминаю!\n\n{essence}"
+    )
+
+async def send_water_reminder(context: ContextTypes.DEFAULT_TYPE):
+    user_id = context.job.data
+    user = await get_user(user_id)
+    name = user["name"] if user else ""
+    await context.bot.send_message(
+        chat_id=user_id,
+        text=f"💧 {name}, не забудьте выпить стакан воды! Это важно для вашего здоровья. 🌊"
     )
 
 async def send_morning_plan(context: ContextTypes.DEFAULT_TYPE):
@@ -231,15 +343,366 @@ async def send_morning_plan(context: ContextTypes.DEFAULT_TYPE):
     if not user:
         return
     name = user["name"]
+    city = user.get("city") or "Москва"
+    tz = pytz.timezone(user["timezone"] if user["timezone"] else "Europe/Moscow")
     reminders = await get_reminders(user_id)
+
+    text = f"☀️ Доброе утро, {name}!\n\n"
+
+    if user.get("morning_motivation"):
+        quote = random.choice(MOTIVATIONAL_QUOTES)
+        text += f"💫 *Мотивация дня:*\n{quote}\n\n"
+
+    if user.get("morning_weather"):
+        weather = await get_weather(city)
+        text += f"{weather}\n\n"
+
     if reminders:
         plan_text = "\n".join([f"🕐 {r['time']} — {r['text']}" for r in sorted(reminders, key=lambda x: x["time"])])
+        text += f"📋 *Ваш план на сегодня:*\n\n{plan_text}"
     else:
-        plan_text = "На сегодня задачи не добавлены."
+        text += "📋 На сегодня задачи не добавлены."
+
+    await context.bot.send_message(chat_id=user_id, text=text, parse_mode="Markdown")
+
+async def send_evening_news(context: ContextTypes.DEFAULT_TYPE):
+    user_id = context.job.data
+    user = await get_user(user_id)
+    if not user:
+        return
+    name = user["name"]
+    news = await get_news()
     await context.bot.send_message(
         chat_id=user_id,
-        text=f"Доброе утро, {name}! ☀️\n\nВаш план на сегодня:\n\n{plan_text}"
+        text=f"🌙 Добрый вечер, {name}!\n\nВот главные новости дня:\n\n{news}",
+        parse_mode="Markdown",
+        disable_web_page_preview=True
     )
+
+def get_main_menu():
+    keyboard = [
+        [InlineKeyboardButton("🌅 Утро", callback_data="menu_morning"),
+         InlineKeyboardButton("📰 Новости", callback_data="menu_news")],
+        [InlineKeyboardButton("💪 Привычки", callback_data="menu_habits"),
+         InlineKeyboardButton("💧 Вода", callback_data="menu_water")],
+        [InlineKeyboardButton("👤 Профиль", callback_data="menu_profile"),
+         InlineKeyboardButton("⚙️ Настройки", callback_data="menu_settings")],
+    ]
+    return InlineKeyboardMarkup(keyboard)
+
+async def show_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    user = await get_user(user_id)
+    if not user or not user["onboarded"]:
+        await update.message.reply_text("Напишите /start чтобы начать 🌸")
+        return
+    name = user["name"]
+    await update.message.reply_text(
+        f"🌸 *Меню Софии*\n\nЗдравствуйте, {name}! Чем могу помочь?",
+        reply_markup=get_main_menu(),
+        parse_mode="Markdown"
+    )
+
+async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    user_id = query.from_user.id
+    user = await get_user(user_id)
+    if not user:
+        return
+    name = user["name"]
+    city = user.get("city") or "Москва"
+
+    if query.data == "menu_morning":
+        keyboard = [
+            [InlineKeyboardButton("📋 План на день", callback_data="morning_plan")],
+            [InlineKeyboardButton("🌤️ Погода", callback_data="morning_weather")],
+            [InlineKeyboardButton("🧘 Мотивация", callback_data="morning_motivation")],
+            [InlineKeyboardButton("◀️ Назад", callback_data="back_main")],
+        ]
+        await query.edit_message_text(
+            "🌅 *Утреннее меню*\n\nВыберите что вас интересует:",
+            reply_markup=InlineKeyboardMarkup(keyboard),
+            parse_mode="Markdown"
+        )
+
+    elif query.data == "morning_plan":
+        reminders = await get_reminders(user_id)
+        if reminders:
+            plan_text = "\n".join([f"🕐 {r['time']} — {r['text']}" for r in sorted(reminders, key=lambda x: x["time"])])
+            text = f"📋 *Ваш план на сегодня:*\n\n{plan_text}"
+        else:
+            text = "📋 На сегодня задачи не добавлены.\n\nНапишите мне чтобы добавить напоминание!"
+        keyboard = [[InlineKeyboardButton("◀️ Назад", callback_data="menu_morning")]]
+        await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="Markdown")
+
+    elif query.data == "morning_weather":
+        await query.edit_message_text("🌤️ Получаю погоду...")
+        weather = await get_weather(city)
+        keyboard = [[InlineKeyboardButton("◀️ Назад", callback_data="menu_morning")]]
+        await query.edit_message_text(weather, reply_markup=InlineKeyboardMarkup(keyboard))
+
+    elif query.data == "morning_motivation":
+        quote = random.choice(MOTIVATIONAL_QUOTES)
+        keyboard = [
+            [InlineKeyboardButton("🔄 Ещё цитата", callback_data="morning_motivation")],
+            [InlineKeyboardButton("◀️ Назад", callback_data="menu_morning")],
+        ]
+        await query.edit_message_text(
+            f"🧘 *Мотивация дня:*\n\n{quote}",
+            reply_markup=InlineKeyboardMarkup(keyboard),
+            parse_mode="Markdown"
+        )
+
+    elif query.data == "menu_news":
+        keyboard = [
+            [InlineKeyboardButton("📰 Главные новости", callback_data="news_top")],
+            [InlineKeyboardButton("🔍 Новости по теме", callback_data="news_topic")],
+            [InlineKeyboardButton("◀️ Назад", callback_data="back_main")],
+        ]
+        await query.edit_message_text(
+            "📰 *Новости*\n\nВыберите тип новостей:",
+            reply_markup=InlineKeyboardMarkup(keyboard),
+            parse_mode="Markdown"
+        )
+
+    elif query.data == "news_top":
+        await query.edit_message_text("📰 Загружаю новости...")
+        news = await get_news()
+        keyboard = [[InlineKeyboardButton("◀️ Назад", callback_data="menu_news")]]
+        await query.edit_message_text(
+            news,
+            reply_markup=InlineKeyboardMarkup(keyboard),
+            parse_mode="Markdown",
+            disable_web_page_preview=True
+        )
+
+    elif query.data == "news_topic":
+        context.user_data["waiting_news_topic"] = True
+        keyboard = [[InlineKeyboardButton("◀️ Отмена", callback_data="menu_news")]]
+        await query.edit_message_text(
+            "🔍 Напишите тему для поиска новостей\n\nНапример: спорт, технологии, бизнес",
+            reply_markup=InlineKeyboardMarkup(keyboard)
+        )
+
+    elif query.data == "menu_habits":
+        async with db_pool.acquire() as conn:
+            habits = await conn.fetch("SELECT id, name FROM habits WHERE user_id = $1", user_id)
+        if habits:
+            lines = [f"✅ {h['name']}" for h in habits]
+            text = "💪 *Ваши привычки:*\n\n" + "\n".join(lines)
+        else:
+            text = "💪 *Трекер привычек*\n\nУ вас пока нет привычек."
+        keyboard = [
+            [InlineKeyboardButton("➕ Добавить привычку", callback_data="habit_add")],
+            [InlineKeyboardButton("✅ Отметить выполнение", callback_data="habit_log")],
+            [InlineKeyboardButton("📊 Статистика", callback_data="habit_stats")],
+            [InlineKeyboardButton("◀️ Назад", callback_data="back_main")],
+        ]
+        await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="Markdown")
+
+    elif query.data == "habit_add":
+        context.user_data["waiting_habit"] = True
+        keyboard = [[InlineKeyboardButton("◀️ Отмена", callback_data="menu_habits")]]
+        await query.edit_message_text(
+            "➕ *Добавить привычку*\n\nНапишите название привычки\n\nНапример: Медитация, Чтение, Зарядка",
+            reply_markup=InlineKeyboardMarkup(keyboard),
+            parse_mode="Markdown"
+        )
+
+    elif query.data == "habit_log":
+        async with db_pool.acquire() as conn:
+            habits = await conn.fetch("SELECT id, name FROM habits WHERE user_id = $1", user_id)
+        if not habits:
+            keyboard = [[InlineKeyboardButton("◀️ Назад", callback_data="menu_habits")]]
+            await query.edit_message_text(
+                "У вас нет привычек. Сначала добавьте привычку!",
+                reply_markup=InlineKeyboardMarkup(keyboard)
+            )
+            return
+        keyboard = [[InlineKeyboardButton(f"✅ {h['name']}", callback_data=f"log_habit_{h['id']}")] for h in habits]
+        keyboard.append([InlineKeyboardButton("◀️ Назад", callback_data="menu_habits")])
+        await query.edit_message_text(
+            "✅ Какую привычку отмечаем?",
+            reply_markup=InlineKeyboardMarkup(keyboard)
+        )
+
+    elif query.data.startswith("log_habit_"):
+        habit_id = int(query.data.split("_")[-1])
+        async with db_pool.acquire() as conn:
+            habit = await conn.fetchrow("SELECT name FROM habits WHERE id = $1", habit_id)
+            await conn.execute(
+                "INSERT INTO habit_logs (user_id, habit_id) VALUES ($1, $2)",
+                user_id, habit_id
+            )
+        keyboard = [[InlineKeyboardButton("◀️ К привычкам", callback_data="menu_habits")]]
+        await query.edit_message_text(
+            f"🎉 Отлично! Привычка *{habit['name']}* отмечена!\n\nТак держать! 💪",
+            reply_markup=InlineKeyboardMarkup(keyboard),
+            parse_mode="Markdown"
+        )
+
+    elif query.data == "habit_stats":
+        async with db_pool.acquire() as conn:
+            habits = await conn.fetch("SELECT id, name FROM habits WHERE user_id = $1", user_id)
+            lines = []
+            for h in habits:
+                count = await conn.fetchval(
+                    "SELECT COUNT(*) FROM habit_logs WHERE habit_id = $1 AND logged_at >= NOW() - INTERVAL '7 days'",
+                    h["id"]
+                )
+                lines.append(f"📊 {h['name']}: {count}/7 дней на этой неделе")
+        text = "📊 *Статистика привычек за 7 дней:*\n\n" + "\n".join(lines) if lines else "Нет данных."
+        keyboard = [[InlineKeyboardButton("◀️ Назад", callback_data="menu_habits")]]
+        await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="Markdown")
+
+    elif query.data == "menu_water":
+        water_on = user.get("water_reminders", False)
+        status = "✅ Включены" if water_on else "❌ Выключены"
+        interval = user.get("water_interval", 2)
+        keyboard = [
+            [InlineKeyboardButton("💧 Выпил воду сейчас!", callback_data="water_drink")],
+            [InlineKeyboardButton(
+                "🔔 Выключить напоминания" if water_on else "🔔 Включить напоминания",
+                callback_data="water_toggle"
+            )],
+            [InlineKeyboardButton("◀️ Назад", callback_data="back_main")],
+        ]
+        await query.edit_message_text(
+            f"💧 *Трекер воды*\n\nНапоминания: {status}\nИнтервал: каждые {interval} часа\n\nНорма воды: 8 стаканов в день 🌊",
+            reply_markup=InlineKeyboardMarkup(keyboard),
+            parse_mode="Markdown"
+        )
+
+    elif query.data == "water_drink":
+        keyboard = [[InlineKeyboardButton("◀️ Назад", callback_data="menu_water")]]
+        await query.edit_message_text(
+            "💧 Отлично! Вы выпили стакан воды!\n\nПродолжайте в том же духе! 🌊",
+            reply_markup=InlineKeyboardMarkup(keyboard)
+        )
+
+    elif query.data == "water_toggle":
+        water_on = user.get("water_reminders", False)
+        new_state = not water_on
+        await save_user(user_id, water_reminders=new_state)
+        if new_state:
+            interval = user.get("water_interval", 2)
+            tz = pytz.timezone(user["timezone"] if user["timezone"] else "Europe/Moscow")
+            context.application.job_queue.run_repeating(
+                send_water_reminder,
+                interval=interval * 3600,
+                first=interval * 3600,
+                data=user_id,
+                name=f"water_{user_id}"
+            )
+            text = f"✅ Напоминания о воде включены!\nБуду напоминать каждые {interval} часа. 💧"
+        else:
+            jobs = context.application.job_queue.get_jobs_by_name(f"water_{user_id}")
+            for job in jobs:
+                job.schedule_removal()
+            text = "❌ Напоминания о воде выключены."
+        keyboard = [[InlineKeyboardButton("◀️ Назад", callback_data="menu_water")]]
+        await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard))
+
+    elif query.data == "menu_profile":
+        async with db_pool.acquire() as conn:
+            total_messages = await conn.fetchval(
+                "SELECT COUNT(*) FROM history WHERE user_id = $1 AND role = 'user'", user_id
+            )
+            habits_count = await conn.fetchval(
+                "SELECT COUNT(*) FROM habits WHERE user_id = $1", user_id
+            )
+        created = user.get("created_at")
+        days = (datetime.now() - created).days if created else 0
+        city = user.get("city") or "Не указан"
+        tz = user.get("timezone") or "Europe/Moscow"
+        text = (
+            f"👤 *Мой профиль*\n\n"
+            f"👋 Имя: {name}\n"
+            f"🌍 Город: {city}\n"
+            f"🕐 Часовой пояс: {tz}\n"
+            f"📅 Дней с нами: {days}\n"
+            f"💬 Сообщений отправлено: {total_messages}\n"
+            f"💪 Привычек отслеживается: {habits_count}"
+        )
+        keyboard = [
+            [InlineKeyboardButton("🌍 Изменить город", callback_data="profile_city")],
+            [InlineKeyboardButton("◀️ Назад", callback_data="back_main")],
+        ]
+        await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard), parse_mode="Markdown")
+
+    elif query.data == "profile_city":
+        context.user_data["waiting_city"] = True
+        keyboard = [[InlineKeyboardButton("◀️ Отмена", callback_data="menu_profile")]]
+        await query.edit_message_text(
+            "🌍 Напишите название вашего города для погоды\n\nНапример: Москва, Алматы, Киев",
+            reply_markup=InlineKeyboardMarkup(keyboard)
+        )
+
+    elif query.data == "menu_settings":
+        morning_weather = "✅" if user.get("morning_weather") else "❌"
+        morning_motivation = "✅" if user.get("morning_motivation") else "❌"
+        evening_news = "✅" if user.get("evening_news") else "❌"
+        water = "✅" if user.get("water_reminders") else "❌"
+        keyboard = [
+            [InlineKeyboardButton(f"{morning_weather} Погода утром", callback_data="toggle_morning_weather")],
+            [InlineKeyboardButton(f"{morning_motivation} Мотивация утром", callback_data="toggle_morning_motivation")],
+            [InlineKeyboardButton(f"{evening_news} Новости вечером", callback_data="toggle_evening_news")],
+            [InlineKeyboardButton(f"{water} Напоминания о воде", callback_data="water_toggle")],
+            [InlineKeyboardButton("◀️ Назад", callback_data="back_main")],
+        ]
+        await query.edit_message_text(
+            "⚙️ *Настройки уведомлений*\n\nВключите или выключите что вам нужно:",
+            reply_markup=InlineKeyboardMarkup(keyboard),
+            parse_mode="Markdown"
+        )
+
+    elif query.data == "toggle_morning_weather":
+        new = not user.get("morning_weather", False)
+        await save_user(user_id, morning_weather=new)
+        status = "включена ✅" if new else "выключена ❌"
+        keyboard = [[InlineKeyboardButton("◀️ Назад", callback_data="menu_settings")]]
+        await query.edit_message_text(
+            f"🌤️ Погода утром {status}",
+            reply_markup=InlineKeyboardMarkup(keyboard)
+        )
+
+    elif query.data == "toggle_morning_motivation":
+        new = not user.get("morning_motivation", False)
+        await save_user(user_id, morning_motivation=new)
+        status = "включена ✅" if new else "выключена ❌"
+        keyboard = [[InlineKeyboardButton("◀️ Назад", callback_data="menu_settings")]]
+        await query.edit_message_text(
+            f"🧘 Мотивация утром {status}",
+            reply_markup=InlineKeyboardMarkup(keyboard)
+        )
+
+    elif query.data == "toggle_evening_news":
+        new = not user.get("evening_news", False)
+        await save_user(user_id, evening_news=new)
+        if new:
+            tz = pytz.timezone(user["timezone"] if user["timezone"] else "Europe/Moscow")
+            context.application.job_queue.run_daily(
+                send_evening_news,
+                time=time(hour=20, minute=0, tzinfo=tz),
+                data=user_id,
+                name=f"evening_news_{user_id}"
+            )
+            text = "📰 Вечерние новости включены ✅\nБуду присылать в 20:00"
+        else:
+            jobs = context.application.job_queue.get_jobs_by_name(f"evening_news_{user_id}")
+            for job in jobs:
+                job.schedule_removal()
+            text = "📰 Вечерние новости выключены ❌"
+        keyboard = [[InlineKeyboardButton("◀️ Назад", callback_data="menu_settings")]]
+        await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard))
+
+    elif query.data == "back_main":
+        await query.edit_message_text(
+            f"🌸 *Меню Софии*\n\nЗдравствуйте, {name}! Чем могу помочь?",
+            reply_markup=get_main_menu(),
+            parse_mode="Markdown"
+        )
 
 async def announce(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
@@ -361,7 +824,7 @@ async def finish_onboarding(update: Update, context: ContextTypes.DEFAULT_TYPE):
         summary += f"\n📋 Утренний план — каждый день в {morning_time}"
     if reminder_before > 0:
         summary += f"\n⏰ Напоминания — за {reminder_before} минут до события"
-    summary += "\n\nМожете начинать! Чем могу помочь? )"
+    summary += "\n\nМожете начинать! Напишите /menu чтобы открыть меню 🌸"
     await update.message.reply_text(summary, reply_markup=ReplyKeyboardRemove())
     username = update.effective_user.username or "нет username"
     await notify_admin(context, name, username, "Завершил онбординг", summary)
@@ -384,6 +847,33 @@ async def process_text_message(update: Update, context: ContextTypes.DEFAULT_TYP
     user_name = update.effective_user.first_name or "Пользователь"
     username = update.effective_user.username or "нет username"
     name = user["name"]
+
+    if context.user_data.get("waiting_habit"):
+        context.user_data["waiting_habit"] = False
+        async with db_pool.acquire() as conn:
+            await conn.execute(
+                "INSERT INTO habits (user_id, name) VALUES ($1, $2)",
+                user_id, user_text
+            )
+        await update.message.reply_text(
+            f"✅ Привычка *{user_text}* добавлена!\n\nОткройте /menu → Привычки чтобы отмечать выполнение.",
+            parse_mode="Markdown"
+        )
+        return
+
+    if context.user_data.get("waiting_city"):
+        context.user_data["waiting_city"] = False
+        await save_user(user_id, city=user_text)
+        await update.message.reply_text(f"🌍 Город изменён на *{user_text}*!", parse_mode="Markdown")
+        return
+
+    if context.user_data.get("waiting_news_topic"):
+        context.user_data["waiting_news_topic"] = False
+        await update.message.reply_text("🔍 Ищу новости...")
+        news = await get_news(topic=user_text)
+        await update.message.reply_text(news, parse_mode="Markdown", disable_web_page_preview=True)
+        return
+
     await add_history(user_id, "user", user_text)
     history = await get_history_db(user_id)
     await context.bot.send_chat_action(chat_id=update.effective_chat.id, action="typing")
@@ -427,6 +917,7 @@ async def process_text_message(update: Update, context: ContextTypes.DEFAULT_TYP
                         name=job_name
                     )
                     await add_reminder(user_id, time_str, essence)
+
         response = groq_client.chat.completions.create(
             model="llama-3.3-70b-versatile",
             messages=[{"role": "system", "content": SYSTEM_PROMPT}, *history],
@@ -509,10 +1000,12 @@ if __name__ == "__main__":
         fallbacks=[CommandHandler("start", start)]
     )
     app.add_handler(conv_handler)
+    app.add_handler(CommandHandler("menu", show_menu))
     app.add_handler(CommandHandler("announce", announce))
     app.add_handler(CommandHandler("stats", stats))
     app.add_handler(CommandHandler("clear", clear))
+    app.add_handler(CallbackQueryHandler(button_handler))
     app.add_handler(MessageHandler(filters.VOICE, handle_voice))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
-    print("🌸 София запущена с голосовыми сообщениями!")
+    print("🌸 София запущена с полным меню!")
     app.run_polling()
