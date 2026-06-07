@@ -24,7 +24,7 @@ ADMIN_ID = 944447597
 DATABASE_URL = os.environ.get("DATABASE_URL")
 
 logging.basicConfig(level=logging.INFO)
-groq_client = OpenAI(api_key=OPENAI_API_KEY, base_url="https://api.aitunnel.ru/v1/")
+groq_client = OpenAI(api_key=OPENAI_API_KEY, base_url="https://aitunnel.ru/v1")
 aai.settings.api_key = ASSEMBLYAI_KEY
 tf = TimezoneFinder()
 
@@ -1293,7 +1293,6 @@ async def process_text_message(update: Update, context: ContextTypes.DEFAULT_TYP
         reply = response.choices[0].message.content
         await add_history(user_id, "assistant", reply)
         await update.message.reply_text(reply)
-        await notify_admin(context, user_name, username, user_text, reply)
     except Exception as e:
         logging.error(f"Ошибка: {e}")
         await update.message.reply_text(t(lang, "error"))
