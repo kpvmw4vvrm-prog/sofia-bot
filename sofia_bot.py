@@ -682,6 +682,11 @@ def is_image_gen_request(text):
     kw_en = ["draw", "generate image", "create image", "make a picture"]
     return any(k in text.lower() for k in kw_ru) or any(k in text.lower() for k in kw_en)
 
+def is_weather_request(text):
+    kw_ru = ["погода", "какая погода", "погоду", "погодой", "температура", "тепло ли", "холодно ли", "дождь", "зонт"]
+    kw_en = ["weather", "temperature", "rain", "sunny", "cold outside", "warm outside"]
+    return any(k in text.lower() for k in kw_ru) or any(k in text.lower() for k in kw_en)
+
 def is_change_style_request(text):
     kw_ru = ["измени стиль", "смени стиль", "общайся как", "хочу чтобы ты общалась", "перейди на", "говори со мной как"]
     kw_en = ["change style", "communicate as", "talk to me as", "switch to style"]
@@ -767,7 +772,7 @@ async def show_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await update.message.reply_text(t("ru", "not_started"))
         return
     lang = user.get("language", "ru")
-    await update.message.reply_text(t(lang, "menu_title", name=user["name"]), reply_markup=get_main_menu(lang))
+    await update.message.reply_text("🌸", reply_markup=get_main_menu(lang))
 
 async def skills_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
@@ -848,6 +853,9 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         cat_info = INTERESTING_QUERIES.get(category, {})
         title = cat_info.get("ru" if ru else "en", "Интересное")
         await query.edit_message_text(f"Загружаю {title}..." if ru else f"Loading {title}...")
+        # Очищаем кэш для свежей загрузки
+        context.user_data.pop(f"interesting_articles_{category}", None)
+        context.user_data.pop(f"interesting_translated_{category}", None)
         articles = await fetch_articles(cat_info.get("query", "interesting news"), 10)
         if not articles:
             back = InlineKeyboardButton("◀️ Назад" if ru else "◀️ Back", callback_data="menu_interesting")
@@ -1177,8 +1185,11 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         back = InlineKeyboardButton("◀️ Назад" if ru else "◀️ Back", callback_data="menu_settings")
         await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup([[back]]))
 
+    elif query.data == "close_menu":
+        await query.edit_message_text("Меню закрыто. Напишите /menu чтобы открыть снова 🌸" if ru else "Menu closed. Type /menu to open again 🌸")
+
     elif query.data == "back_main":
-        await query.edit_message_text(t(lang, "menu_title", name=name), reply_markup=get_main_menu(lang))
+        await query.edit_message_text("🌸", reply_markup=get_main_menu(lang))
 
 async def announce(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id != ADMIN_ID:
@@ -1504,6 +1515,25 @@ async def process_text_message(update: Update, context: ContextTypes.DEFAULT_TYP
                 await notify_admin(context, user_name, username, user_text, news[:200])
                 return
 
+        # Погода в чате
+        if is_weather_request(user_text) and not is_reminder_request(user_text):
+            await context.bot.send_chat_action(chat_id=update.effective_chat.id, action="typing")
+            # Определяем хочет ли завтрашнюю погоду
+            if "завтра" in user_text.lower() or "tomorrow" in user_text.lower():
+                forecast = await get_weather_forecast(city, lang)
+                if forecast:
+                    lines = forecast.split("\n\n")[1].split("\n") if "\n\n" in forecast else []
+                    tomorrow = lines[1] if len(lines) > 1 else ""
+                    if tomorrow:
+                        reply = f"Завтра в {city_in_form(city) if lang == 'ru' else city}: {tomorrow}" if lang == "ru" else f"Tomorrow in {city}: {tomorrow}"
+                        await update.message.reply_text(reply)
+                        await notify_admin(context, user_name, username, user_text, reply)
+                        return
+            weather = await get_weather(city, lang)
+            await update.message.reply_text(weather)
+            await notify_admin(context, user_name, username, user_text, weather)
+            return
+
         # Напоминания
         if is_reminder_request(user_text):
             tz = pytz.timezone(user["timezone"] or "Europe/Moscow")
@@ -1544,10 +1574,7 @@ async def process_text_message(update: Update, context: ContextTypes.DEFAULT_TYP
         )
         reply = response.choices[0].message.content
         await add_history(user_id, "assistant", reply)
-        try:
-            await update.message.reply_text(reply, parse_mode="Markdown")
-        except:
-            await update.message.reply_text(reply)
+        await update.message.reply_text(reply)
         await notify_admin(context, user_name, username, user_text, reply)
     except Exception as e:
         logging.error(f"Ошибка: {e}")
