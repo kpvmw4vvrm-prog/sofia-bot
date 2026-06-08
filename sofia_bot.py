@@ -68,8 +68,8 @@ TEXTS = {
         "ask_morning": "Хотите чтобы я каждое утро присылала план дня?",
         "ask_morning_time": "В какое время присылать утренний план?",
         "ask_reminders": "Напоминать о делах заранее?",
-        "ask_evening_news": "Хотите получать вечернюю сводку — краткий итог дня и полезные советы?",
-        "ask_evening_time": "В какое время присылать вечернюю сводку?",
+        "ask_evening_news": "Хотите получать вечернюю сводку новостей — главные события дня и полезные советы на вечер?",
+        "ask_evening_time": "В какое время присылать вечернюю сводку новостей?",
         "ask_comm_style": "Как вам удобнее чтобы я общалась с вами?",
         "finish": "Всё готово, {name}! 🌸\n\nЯ запомнила ваши настройки. Напишите /menu чтобы открыть меню.",
         "menu_title": "Меню Софии\n\nЗдравствуйте, {name}! Чем могу помочь?",
@@ -499,27 +499,43 @@ async def get_news(query=None, lang="ru"):
     if not NEWS_API_KEY:
         return None
     try:
-        params = {"apiKey": NEWS_API_KEY, "pageSize": 5, "language": "ru" if lang == "ru" else "en"}
+        # Всегда берём английские новости (бесплатный план не поддерживает ru)
+        params = {"apiKey": NEWS_API_KEY, "pageSize": 5, "language": "en"}
         if query:
             params["q"] = query
             url = "https://newsapi.org/v2/everything"
             params["sortBy"] = "publishedAt"
         else:
             url = "https://newsapi.org/v2/top-headlines"
-            params["country"] = "ru" if lang == "ru" else "us"
+            params["country"] = "us"
         async with httpx.AsyncClient(timeout=10) as http:
             response = await http.get(url, params=params)
         data = response.json()
         if data.get("status") != "ok" or not data.get("articles"):
             return None
-        lines = []
-        for i, a in enumerate(data["articles"][:5], 1):
+        titles = []
+        for a in data["articles"][:5]:
             title = a.get("title", "").split(" - ")[0]
             if title and title != "[Removed]":
-                lines.append(f"{i}. {title}")
-        if not lines:
+                titles.append(title)
+        if not titles:
             return None
-        header = f"Новости по запросу «{query}»:" if query and lang == "ru" else f"News for «{query}»:" if query else "Свежие новости:" if lang == "ru" else "Latest news:"
+        # Если русский язык — переводим через AI
+        if lang == "ru":
+            titles_text = "\n".join([f"{i+1}. {t}" for i, t in enumerate(titles)])
+            try:
+                resp = ai_client.chat.completions.create(
+                    model="gpt-4o-mini",
+                    messages=[{"role": "system", "content": "Переведи заголовки новостей на русский язык. Отвечай только переведёнными заголовками с номерами, без лишнего текста."}, {"role": "user", "content": titles_text}],
+                    max_tokens=400, temperature=0.3
+                )
+                translated = resp.choices[0].message.content.strip()
+                header = f"Новости по запросу «{query}»:" if query else "Свежие новости:"
+                return f"{header}\n\n{translated}"
+            except:
+                pass
+        lines = [f"{i+1}. {t}" for i, t in enumerate(titles)]
+        header = f"News for «{query}»:" if query else "Latest news:"
         return f"{header}\n\n" + "\n\n".join(lines)
     except Exception as e:
         logging.error(f"Ошибка новостей: {e}")
@@ -527,7 +543,7 @@ async def get_news(query=None, lang="ru"):
 
 async def generate_image(prompt):
     try:
-        response = ai_client.images.generate(model="dall-e-3", prompt=prompt, size="1024x1024", n=1)
+        response = ai_client.images.generate(model="dall-e-2", prompt=prompt, size="512x512", n=1)
         return response.data[0].url
     except Exception as e:
         logging.error(f"Ошибка генерации изображения: {e}")
