@@ -544,7 +544,12 @@ async def get_news(query=None, lang="ru"):
 async def generate_image(prompt):
     try:
         response = ai_client.images.generate(model="gpt-image-1-mini", prompt=prompt, size="1024x1024", n=1)
-        return response.data[0].url
+        item = response.data[0]
+        if hasattr(item, 'url') and item.url:
+            return item.url
+        elif hasattr(item, 'b64_json') and item.b64_json:
+            return f"data:image/png;base64,{item.b64_json}"
+        return None
     except Exception as e:
         logging.error(f"Ошибка генерации изображения: {e}")
         return None
@@ -1395,7 +1400,12 @@ async def process_text_message(update: Update, context: ContextTypes.DEFAULT_TYP
             sent_msg = await update.message.reply_text(msg)
             image_url = await generate_image(prompt)
             if image_url:
-                await context.bot.send_photo(chat_id=update.effective_chat.id, photo=image_url)
+                if image_url.startswith("data:image"):
+                    import io
+                    img_data = base64.b64decode(image_url.split(",")[1])
+                    await context.bot.send_photo(chat_id=update.effective_chat.id, photo=io.BytesIO(img_data))
+                else:
+                    await context.bot.send_photo(chat_id=update.effective_chat.id, photo=image_url)
                 await notify_admin(context, user_name, username, user_text, "[Сгенерировано изображение]")
             else:
                 await update.message.reply_text("Не удалось сгенерировать изображение." if ru else "Could not generate image.")
