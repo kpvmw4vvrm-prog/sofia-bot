@@ -1029,7 +1029,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             text = ("Ваши заметки:\n\n" if ru else "Your notes:\n\n") + "\n".join(lines)
         else:
             text = "Заметок пока нет." if ru else "No notes yet."
-        text += "\n\nНапишите что угодно и я сохраню!" if ru else "\n\nWrite anything and I'll save it!"
+        text += "\n\nНапишите что угодно и я сохраню!" if ru else "\n\nWrite anything and I will save it!"
         context.user_data["waiting_note"] = True
         back = InlineKeyboardButton("◀️ Назад" if ru else "◀️ Back", callback_data="menu_diary")
         await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup([[back]]))
