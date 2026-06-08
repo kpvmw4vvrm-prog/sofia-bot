@@ -543,7 +543,7 @@ async def get_news(query=None, lang="ru"):
 
 async def generate_image(prompt):
     try:
-        response = ai_client.images.generate(model="dall-e-2", prompt=prompt, size="512x512", n=1)
+        response = ai_client.images.generate(model="gpt-image-1-mini", prompt=prompt, size="1024x1024", n=1)
         return response.data[0].url
     except Exception as e:
         logging.error(f"Ошибка генерации изображения: {e}")
