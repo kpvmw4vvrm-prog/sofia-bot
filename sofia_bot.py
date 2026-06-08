@@ -22,6 +22,7 @@ TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
 OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY")
 ASSEMBLYAI_KEY = os.environ.get("ASSEMBLYAI_KEY")
 WEATHER_API_KEY = os.environ.get("WEATHER_API_KEY")
+NEWS_API_KEY = os.environ.get("NEWS_API_KEY")
 ADMIN_ID = 944447597
 DATABASE_URL = os.environ.get("DATABASE_URL")
 
@@ -122,31 +123,59 @@ def get_current_datetime(timezone_str="Europe/Moscow"):
         now = datetime.now()
         return {"ru": now.strftime("%d.%m.%Y %H:%M"), "en": now.strftime("%B %d, %Y %H:%M")}
 
+CITY_PREPOSITIONS = {
+    "москва": "Москве", "санкт-петербург": "Санкт-Петербурге", "петербург": "Петербурге",
+    "новосибирск": "Новосибирске", "екатеринбург": "Екатеринбурге", "казань": "Казани",
+    "нижний новгород": "Нижнем Новгороде", "челябинск": "Челябинске", "самара": "Самаре",
+    "омск": "Омске", "ростов-на-дону": "Ростове-на-Дону", "уфа": "Уфе",
+    "красноярск": "Красноярске", "пермь": "Перми", "воронеж": "Воронеже",
+    "волгоград": "Волгограде", "краснодар": "Краснодаре", "саратов": "Саратове",
+    "тюмень": "Тюмени", "тольятти": "Тольятти", "ижевск": "Ижевске",
+    "барнаул": "Барнауле", "ульяновск": "Ульяновске", "иркутск": "Иркутске",
+    "хабаровск": "Хабаровске", "ярославль": "Ярославле", "владивосток": "Владивостоке",
+    "дубай": "Дубае", "алматы": "Алматы", "ташкент": "Ташкенте",
+    "минск": "Минске", "баку": "Баку", "ереван": "Ереване", "тбилиси": "Тбилиси",
+    "лондон": "Лондоне", "париж": "Париже", "берлин": "Берлине", "нью-йорк": "Нью-Йорке",
+}
+
+def city_in_form(city):
+    key = city.lower().strip()
+    if key in CITY_PREPOSITIONS:
+        return CITY_PREPOSITIONS[key]
+    if key.endswith("ск") or key.endswith("вск"):
+        return city + "е"
+    if key.endswith("ль"):
+        return city[:-1] + "е"
+    if key.endswith("ов") or key.endswith("ев"):
+        return city + "е"
+    if key.endswith("а"):
+        return city[:-1] + "е"
+    if key.endswith("я"):
+        return city[:-1] + "е"
+    return city
+
 SYSTEM_PROMPT_RU = """Ты — София, личный ассистент и наставник.
 
-СТИЛЬ ОБЩЕНИЯ — строго соблюдай стиль указанный в начале сообщения:
-подружка → пиши на ты, тепло, неформально, можно с юмором, как близкая подруга
-наставник → пиши на вы, мотивирующе, поддерживающе, вдохновляюще
-профессионал → пиши на вы, чётко, коротко, без лишних слов и эмодзи
-свой стиль → адаптируйся под то как пишет пользователь
+СТИЛЬ ОБЩЕНИЯ — СТРОГО соблюдай стиль из профиля:
+подружка → ОБЯЗАТЕЛЬНО на ты, тепло, неформально, как близкая подруга, можно с юмором. НИКОГДА не говори "вы" при этом стиле!
+наставник → на вы, мотивирующе, поддерживающе, вдохновляюще
+профессионал → на вы, чётко, коротко, без лишних слов и эмодзи
 
-ФОРМАТИРОВАНИЕ — очень важно:
-Пиши как живой человек в мессенджере. Никаких заголовков с #. Никаких разделителей ---. Никаких маркеров списка * или - в начале строк. Жирный шрифт (*слово*) только для самого важного, редко. Курсив (_слово_) иногда для акцента. Эмодзи умеренно. Короткие абзацы. Один вопрос за раз.
+ФОРМАТИРОВАНИЕ:
+Пиши как живой человек в мессенджере. Никаких # заголовков. Никаких --- разделителей. Никаких маркеров * или - в начале строк. Жирный (*слово*) только для самого важного, редко. Курсив (_слово_) иногда. Эмодзи умеренно. Короткие абзацы. Один вопрос за раз.
 
 ДАТА И ВРЕМЯ:
-Текущая дата и время указаны в начале каждого сообщения системы. Ты ВСЕГДА знаешь какое сейчас число, день недели и время. Никогда не говори что не знаешь дату или время.
+Текущая дата и время указаны в начале сообщения. Ты ВСЕГДА знаешь дату и время. Никогда не говори что не знаешь.
 
 ПАМЯТЬ:
-Помнишь всё что пользователь говорил — имена близких, цели, предпочтения, важные даты. Используй эту информацию естественно в разговоре. Никогда не говори "я не помню".
+Помнишь всё что пользователь говорил. Используй естественно. Никогда не говори "я не помню".
 
-О СОЗДАТЕЛЕ — отвечай дозированно:
-Если спросили "кто тебя создал" → "Меня создала Ирина Солодкова 🌸"
-Если спросили больше → "Ирине 17 лет, она из Волгограда, сейчас живёт и учится в Дубае. Увлекается искусственным интеллектом и бизнесом."
-Если спросили контакты → "По вопросам: irinasa_00@mail.ru"
-Не рассказывай всё сразу — только то что спросили.
+О СОЗДАТЕЛЕ — дозированно:
+"кто создал" → "Меня создала Ирина Солодкова 🌸"
+"расскажи больше" → "Ирине 17 лет, она из Волгограда, сейчас живёт и учится в Дубае. Увлекается ИИ и бизнесом."
+"контакты" → "irinasa_00@mail.ru"
 
-ЧТО УМЕЕШЬ:
-Планирование, напоминания, психологическая поддержка, нутрициология, достижение целей, ответы на любые вопросы.
+ЧТО УМЕЕШЬ: планирование, напоминания, поддержка, нутрициология, цели, любые вопросы.
 
 Формат плана (только когда просят):
 09:00 — задача
@@ -154,29 +183,26 @@ SYSTEM_PROMPT_RU = """Ты — София, личный ассистент и н
 
 SYSTEM_PROMPT_EN = """You are Sofia, a personal assistant and mentor.
 
-COMMUNICATION STYLE — strictly follow the style specified at the start:
-friend → use casual tone, warm, informal, can be humorous, like a close friend
-mentor → use formal tone, motivating, supportive, inspiring
-professional → formal tone, clear, brief, no unnecessary words or emojis
-custom → adapt to how the user writes
+COMMUNICATION STYLE — STRICTLY follow the style from the profile:
+friend → MUST use casual/informal tone, warm, like a close friend, can be humorous — NEVER use formal tone with this style!
+mentor → formal tone, motivating, supportive, inspiring
+professional → formal, clear, brief, no unnecessary words or emojis
 
-FORMATTING — very important:
-Write like a real person in a messenger. No # headers. No --- separators. No list markers * or - at line starts. Bold (*word*) only for the most important things, rarely. Italics (_word_) occasionally for emphasis. Emojis in moderation. Short paragraphs. One question at a time.
+FORMATTING:
+Write like a real person in a messenger. No # headers. No --- separators. No * or - list markers. Bold (*word*) rarely. Italics (_word_) occasionally. Emojis in moderation. Short paragraphs. One question at a time.
 
 DATE AND TIME:
-Current date and time are provided at the start of each system message. You ALWAYS know the current date, day of week and time. Never say you don't know the date or time.
+Current date and time are at the start of each message. You ALWAYS know the date and time.
 
 MEMORY:
-Remember everything the user said — names of loved ones, goals, preferences, important dates. Use this information naturally. Never say "I don't remember".
+Remember everything the user said. Use naturally. Never say "I don't remember".
 
-ABOUT CREATOR — answer gradually:
-If asked "who created you" → "I was created by Irina Solodkova 🌸"
-If asked more → "Irina is 17, from Volgograd, currently lives and studies in Dubai. Passionate about AI and business."
-If asked for contact → "For questions: irinasa_00@mail.ru"
-Don't share everything at once — only what was asked.
+ABOUT CREATOR — gradually:
+"who created you" → "I was created by Irina Solodkova 🌸"
+"tell me more" → "Irina is 17, from Volgograd, lives and studies in Dubai. Passionate about AI and business."
+"contact" → "irinasa_00@mail.ru"
 
-WHAT YOU CAN DO:
-Planning, reminders, psychological support, nutrition advice, goal achievement, answering any questions.
+WHAT YOU CAN DO: planning, reminders, support, nutrition, goals, any questions.
 
 Plan format (only when asked):
 09:00 — task
@@ -184,21 +210,25 @@ Plan format (only when asked):
 
 SKILLS_RU = """Вот что я умею 🌸
 
-Обучаюсь под вас — запоминаю предпочтения, привычки и цели. Со временем знаю вас всё лучше.
+Обучаюсь под вас — запоминаю предпочтения, привычки и цели.
 
-Планирование — составлю план на день, неделю или месяц.
+Планирование — план на день, неделю или месяц.
 
-Голосовые сообщения — говорите вслух, я пойму и отвечу.
+Голосовые сообщения — говорите вслух, пойму и отвечу.
+
+Анализ фото — пришлите фото, опишу или отвечу на вопрос.
+
+Генерация изображений — напишите "нарисуй..." и я создам картинку.
+
+Новости — свежие новости по вашему запросу.
 
 Два языка — русский и английский 🇷🇺 🇬🇧
 
-Умные напоминания — напомню за нужное время до события.
-
-Утренний план — каждое утро план дел, погода и мотивация.
+Умные напоминания, утренний план, погода по часам и на неделю.
 
 Трекер привычек, сна, воды, финансов.
 
-Заметки, рецепты, рекомендации фильмов.
+Список покупок, заметки, рецепты, фильмы.
 
 Психологическая поддержка и советы нутрициолога.
 
@@ -206,21 +236,25 @@ SKILLS_RU = """Вот что я умею 🌸
 
 SKILLS_EN = """Here's what I can do 🌸
 
-I learn from you — I remember your preferences, habits and goals.
+I learn from you — remember preferences, habits and goals.
 
-Planning — plans for the day, week or month.
+Planning — plans for day, week or month.
 
-Voice messages — speak out loud, I'll understand and respond.
+Voice messages — speak out loud, I'll understand.
+
+Photo analysis — send a photo, I'll describe it or answer questions.
+
+Image generation — write "draw..." and I'll create an image.
+
+News — fresh news on your request.
 
 Two languages — Russian and English 🇷🇺 🇬🇧
 
-Smart reminders — I'll remind you at the right time.
-
-Morning plan — every morning tasks, weather and motivation.
+Smart reminders, morning plan, hourly and weekly weather.
 
 Habit, sleep, water, finance trackers.
 
-Notes, recipes, movie recommendations.
+Shopping list, notes, recipes, movies.
 
 Psychological support and nutrition advice.
 
@@ -254,86 +288,23 @@ async def init_db():
                 comm_style TEXT DEFAULT 'наставник'
             )
         """)
-        await conn.execute("""
-            CREATE TABLE IF NOT EXISTS reminders (
-                id SERIAL PRIMARY KEY,
-                user_id BIGINT,
-                time_str TEXT,
-                text TEXT,
-                created_at TIMESTAMP DEFAULT NOW()
-            )
-        """)
-        await conn.execute("""
-            CREATE TABLE IF NOT EXISTS history (
-                id SERIAL PRIMARY KEY,
-                user_id BIGINT,
-                role TEXT,
-                content TEXT,
-                created_at TIMESTAMP DEFAULT NOW()
-            )
-        """)
-        await conn.execute("""
-            CREATE TABLE IF NOT EXISTS habits (
-                id SERIAL PRIMARY KEY,
-                user_id BIGINT,
-                name TEXT,
-                created_at TIMESTAMP DEFAULT NOW()
-            )
-        """)
-        await conn.execute("""
-            CREATE TABLE IF NOT EXISTS habit_logs (
-                id SERIAL PRIMARY KEY,
-                user_id BIGINT,
-                habit_id INTEGER,
-                logged_at TIMESTAMP DEFAULT NOW()
-            )
-        """)
-        await conn.execute("""
-            CREATE TABLE IF NOT EXISTS finances (
-                id SERIAL PRIMARY KEY,
-                user_id BIGINT,
-                amount FLOAT,
-                type TEXT,
-                category TEXT,
-                description TEXT,
-                created_at TIMESTAMP DEFAULT NOW()
-            )
-        """)
-        await conn.execute("""
-            CREATE TABLE IF NOT EXISTS sleep_logs (
-                id SERIAL PRIMARY KEY,
-                user_id BIGINT,
-                bedtime TEXT,
-                wake_time TEXT,
-                created_at TIMESTAMP DEFAULT NOW()
-            )
-        """)
-        await conn.execute("""
-            CREATE TABLE IF NOT EXISTS notes (
-                id SERIAL PRIMARY KEY,
-                user_id BIGINT,
-                text TEXT,
-                created_at TIMESTAMP DEFAULT NOW()
-            )
-        """)
-        await conn.execute("""
-            CREATE TABLE IF NOT EXISTS user_memory (
-                id SERIAL PRIMARY KEY,
-                user_id BIGINT,
-                key TEXT,
-                value TEXT,
-                updated_at TIMESTAMP DEFAULT NOW()
-            )
-        """)
+        for table in [
+            """CREATE TABLE IF NOT EXISTS reminders (id SERIAL PRIMARY KEY, user_id BIGINT, time_str TEXT, text TEXT, created_at TIMESTAMP DEFAULT NOW())""",
+            """CREATE TABLE IF NOT EXISTS history (id SERIAL PRIMARY KEY, user_id BIGINT, role TEXT, content TEXT, created_at TIMESTAMP DEFAULT NOW())""",
+            """CREATE TABLE IF NOT EXISTS habits (id SERIAL PRIMARY KEY, user_id BIGINT, name TEXT, created_at TIMESTAMP DEFAULT NOW())""",
+            """CREATE TABLE IF NOT EXISTS habit_logs (id SERIAL PRIMARY KEY, user_id BIGINT, habit_id INTEGER, logged_at TIMESTAMP DEFAULT NOW())""",
+            """CREATE TABLE IF NOT EXISTS finances (id SERIAL PRIMARY KEY, user_id BIGINT, amount FLOAT, type TEXT, category TEXT, description TEXT, created_at TIMESTAMP DEFAULT NOW())""",
+            """CREATE TABLE IF NOT EXISTS sleep_logs (id SERIAL PRIMARY KEY, user_id BIGINT, bedtime TEXT, wake_time TEXT, created_at TIMESTAMP DEFAULT NOW())""",
+            """CREATE TABLE IF NOT EXISTS notes (id SERIAL PRIMARY KEY, user_id BIGINT, text TEXT, created_at TIMESTAMP DEFAULT NOW())""",
+            """CREATE TABLE IF NOT EXISTS user_memory (id SERIAL PRIMARY KEY, user_id BIGINT, key TEXT, value TEXT, updated_at TIMESTAMP DEFAULT NOW())""",
+            """CREATE TABLE IF NOT EXISTS shopping_list (id SERIAL PRIMARY KEY, user_id BIGINT, item TEXT, done BOOLEAN DEFAULT FALSE, created_at TIMESTAMP DEFAULT NOW())""",
+        ]:
+            await conn.execute(table)
         for col, definition in [
-            ("city", "TEXT DEFAULT 'Москва'"),
-            ("water_reminders", "BOOLEAN DEFAULT FALSE"),
-            ("water_interval", "INTEGER DEFAULT 2"),
-            ("morning_weather", "BOOLEAN DEFAULT FALSE"),
-            ("morning_motivation", "BOOLEAN DEFAULT FALSE"),
-            ("language", "TEXT DEFAULT 'ru'"),
-            ("evening_news", "BOOLEAN DEFAULT FALSE"),
-            ("evening_time", "TEXT DEFAULT '21:00'"),
+            ("city", "TEXT DEFAULT 'Москва'"), ("water_reminders", "BOOLEAN DEFAULT FALSE"),
+            ("water_interval", "INTEGER DEFAULT 2"), ("morning_weather", "BOOLEAN DEFAULT FALSE"),
+            ("morning_motivation", "BOOLEAN DEFAULT FALSE"), ("language", "TEXT DEFAULT 'ru'"),
+            ("evening_news", "BOOLEAN DEFAULT FALSE"), ("evening_time", "TEXT DEFAULT '21:00'"),
             ("comm_style", "TEXT DEFAULT 'наставник'"),
         ]:
             try:
@@ -373,33 +344,24 @@ async def save_memory_item(user_id, key, value):
             await conn.execute("INSERT INTO user_memory (user_id, key, value) VALUES ($1, $2, $3)", user_id, key, value)
 
 async def extract_and_save_memory(user_id, user_text, lang):
-    # Только если сообщение содержит личную информацию (имена, факты о себе)
-    personal_keywords_ru = ["меня зовут", "мой", "моя", "моё", "мои", "я работаю", "я живу", "я учусь", "моего", "моей", "ребёнок", "дети", "муж", "жена", "день рождения", "хочу", "люблю", "не люблю", "аллергия"]
-    personal_keywords_en = ["my name", "my ", "i work", "i live", "i study", "my child", "children", "husband", "wife", "birthday", "i want", "i love", "i hate", "allergy"]
-    
+    personal_keywords_ru = ["меня зовут", "мой ", "моя ", "моё ", "мои ", "я работаю", "я живу", "я учусь", "ребёнок", "дети", "муж", "жена", "день рождения", "люблю", "не люблю", "аллергия"]
+    personal_keywords_en = ["my name", "my ", "i work", "i live", "i study", "my child", "husband", "wife", "birthday", "i love", "i hate", "allergy"]
     text_lower = user_text.lower()
     has_personal = any(k in text_lower for k in (personal_keywords_ru if lang == "ru" else personal_keywords_en))
-    
     if not has_personal or len(user_text) < 10:
         return
-    
     try:
-        system = """Анализируй сообщение и извлекай ТОЛЬКО конкретные личные факты для запоминания.
-Извлекай: имена (детей, партнёра, близких), город, работу, цели, предпочтения в еде, важные даты, здоровье.
-НЕ извлекай: вопросы, команды, общие фразы, текущий разговор.
-Отвечай ТОЛЬКО валидным JSON: {"ключ": "значение"} или {}
-Ключи только на русском, конкретные: имя_ребёнка, город, работа, цель, день_рождения, предпочтения_еда""" if lang == "ru" else """Analyze the message and extract ONLY specific personal facts to remember.
-Extract: names (children, partner, family), city, work, goals, food preferences, important dates, health.
-Do NOT extract: questions, commands, general phrases, current conversation.
-Reply ONLY with valid JSON: {"key": "value"} or {}"""
-        
+        system = """Извлекай ТОЛЬКО конкретные личные факты: имена близких, город, работу, цели, предпочтения еды, важные даты, здоровье.
+НЕ извлекай вопросы, команды, общие фразы.
+ТОЛЬКО валидный JSON: {"ключ": "значение"} или {}""" if lang == "ru" else """Extract ONLY specific personal facts: names, city, work, goals, food preferences, important dates, health.
+Do NOT extract questions, commands, general phrases.
+ONLY valid JSON: {"key": "value"} or {}"""
         response = ai_client.chat.completions.create(
             model="gpt-4o-mini",
             messages=[{"role": "system", "content": system}, {"role": "user", "content": user_text}],
             max_tokens=150, temperature=0.1
         )
-        result = response.choices[0].message.content.strip()
-        result = result.replace("```json", "").replace("```", "").strip()
+        result = response.choices[0].message.content.strip().replace("```json", "").replace("```", "").strip()
         if result == "{}" or not result:
             return
         data = json.loads(result)
@@ -419,16 +381,8 @@ async def get_history_db(user_id, limit=25):
 
 async def add_history(user_id, role, content):
     async with db_pool.acquire() as conn:
-        await conn.execute(
-            "INSERT INTO history (user_id, role, content) VALUES ($1, $2, $3)",
-            user_id, role, content
-        )
-        await conn.execute("""
-            DELETE FROM history WHERE id IN (
-                SELECT id FROM history WHERE user_id = $1
-                ORDER BY created_at DESC OFFSET 25
-            )
-        """, user_id)
+        await conn.execute("INSERT INTO history (user_id, role, content) VALUES ($1, $2, $3)", user_id, role, content)
+        await conn.execute("DELETE FROM history WHERE id IN (SELECT id FROM history WHERE user_id = $1 ORDER BY created_at DESC OFFSET 25)", user_id)
 
 async def get_reminders(user_id):
     async with db_pool.acquire() as conn:
@@ -461,16 +415,11 @@ async def notify_admin(context, user_name, username, user_text, reply):
 async def get_timezone_by_city(city):
     try:
         async with httpx.AsyncClient(timeout=10) as http:
-            response = await http.get(
-                "https://api.openweathermap.org/data/2.5/weather",
-                params={"q": city, "appid": WEATHER_API_KEY}
-            )
+            response = await http.get("https://api.openweathermap.org/data/2.5/weather", params={"q": city, "appid": WEATHER_API_KEY})
         data = response.json()
         if data.get("cod") != 200:
             return "Europe/Moscow"
-        lat = data["coord"]["lat"]
-        lon = data["coord"]["lon"]
-        tz = tf.timezone_at(lat=lat, lng=lon)
+        tz = tf.timezone_at(lat=data["coord"]["lat"], lng=data["coord"]["lon"])
         return tz or "Europe/Moscow"
     except:
         return "Europe/Moscow"
@@ -478,18 +427,17 @@ async def get_timezone_by_city(city):
 async def get_weather(city, lang="ru"):
     try:
         async with httpx.AsyncClient(timeout=10) as http:
-            response = await http.get(
-                "https://api.openweathermap.org/data/2.5/weather",
-                params={"q": city, "appid": WEATHER_API_KEY, "units": "metric", "lang": lang}
-            )
+            response = await http.get("https://api.openweathermap.org/data/2.5/weather", params={"q": city, "appid": WEATHER_API_KEY, "units": "metric", "lang": lang})
         data = response.json()
         if data.get("cod") != 200:
-            return f"Не удалось получить погоду для {city}." if lang == "ru" else f"Could not get weather for {city}."
+            city_form = city_in_form(city) if lang == "ru" else city
+            return f"Не удалось получить погоду для {city_form}." if lang == "ru" else f"Could not get weather for {city}."
         temp = round(data["main"]["temp"])
         feels = round(data["main"]["feels_like"])
         desc = data["weather"][0]["description"]
         humidity = data["main"]["humidity"]
         wind = data["wind"]["speed"]
+        city_form = city_in_form(city) if lang == "ru" else city
         if lang == "en":
             advice = "🧥 Dress warmly!" if temp < 0 else "🧣 Take a jacket." if temp < 10 else "👕 Light jacket." if temp < 18 else "☀️ Perfect weather!"
             if "rain" in desc: advice += " ☂️ Take an umbrella!"
@@ -497,21 +445,39 @@ async def get_weather(city, lang="ru"):
         else:
             advice = "🧥 Оденьтесь тепло!" if temp < 0 else "🧣 Возьмите куртку." if temp < 10 else "👕 Лёгкая куртка." if temp < 18 else "☀️ Отличная погода!"
             if "дождь" in desc or "ливень" in desc: advice += " ☂️ Возьмите зонт!"
-            return f"Погода в {city}:\n\n🌡 {temp}°C (ощущается как {feels}°C)\n{desc.capitalize()}\nВлажность: {humidity}%\nВетер: {wind} м/с\n\n{advice}"
+            return f"Погода в {city_form}:\n\n🌡 {temp}°C (ощущается как {feels}°C)\n{desc.capitalize()}\nВлажность: {humidity}%\nВетер: {wind} м/с\n\n{advice}"
     except Exception as e:
         logging.error(f"Ошибка погоды: {e}")
         return "Погода недоступна." if lang == "ru" else "Weather unavailable."
 
-async def get_weather_forecast(city, lang="ru"):
+async def get_weather_hourly(city, lang="ru"):
     try:
         async with httpx.AsyncClient(timeout=10) as http:
-            response = await http.get(
-                "https://api.openweathermap.org/data/2.5/forecast",
-                params={"q": city, "appid": WEATHER_API_KEY, "units": "metric", "lang": lang, "cnt": 24}
-            )
+            response = await http.get("https://api.openweathermap.org/data/2.5/forecast", params={"q": city, "appid": WEATHER_API_KEY, "units": "metric", "lang": lang, "cnt": 8})
         data = response.json()
         if data.get("cod") != "200":
             return None
+        city_form = city_in_form(city) if lang == "ru" else city
+        lines = []
+        for item in data["list"][:8]:
+            dt = datetime.fromtimestamp(item["dt"])
+            hour = dt.strftime("%H:%M")
+            temp = round(item["main"]["temp"])
+            desc = item["weather"][0]["description"]
+            lines.append(f"{hour} — {temp}°C, {desc}")
+        title = f"Погода в {city_form} по часам:" if lang == "ru" else f"Hourly weather in {city}:"
+        return f"{title}\n\n" + "\n".join(lines)
+    except:
+        return None
+
+async def get_weather_forecast(city, lang="ru"):
+    try:
+        async with httpx.AsyncClient(timeout=10) as http:
+            response = await http.get("https://api.openweathermap.org/data/2.5/forecast", params={"q": city, "appid": WEATHER_API_KEY, "units": "metric", "lang": lang, "cnt": 40})
+        data = response.json()
+        if data.get("cod") != "200":
+            return None
+        city_form = city_in_form(city) if lang == "ru" else city
         days = {}
         for item in data["list"]:
             date = item["dt_txt"][:10]
@@ -519,24 +485,52 @@ async def get_weather_forecast(city, lang="ru"):
                 days[date] = {"temps": [], "desc": item["weather"][0]["description"]}
             days[date]["temps"].append(item["main"]["temp"])
         result = []
-        for date, info in list(days.items())[:5]:
-            result.append(f"{date}: {round(min(info['temps']))}°C — {round(max(info['temps']))}°C, {info['desc']}")
-        return "\n".join(result)
+        months_ru = ["янв","фев","мар","апр","мая","июн","июл","авг","сен","окт","ноя","дек"]
+        for date, info in list(days.items())[:7]:
+            dt = datetime.strptime(date, "%Y-%m-%d")
+            date_str = f"{dt.day} {months_ru[dt.month-1]}" if lang == "ru" else dt.strftime("%b %d")
+            result.append(f"{date_str}: {round(min(info['temps']))}°C — {round(max(info['temps']))}°C, {info['desc']}")
+        title = f"Прогноз погоды в {city_form}:" if lang == "ru" else f"Weather forecast for {city}:"
+        return f"{title}\n\n" + "\n".join(result)
     except:
         return None
 
-async def web_search(query, lang="ru"):
+async def get_news(query=None, lang="ru"):
+    if not NEWS_API_KEY:
+        return None
     try:
-        response = ai_client.chat.completions.create(
-            model="gpt-4o-mini",
-            messages=[{
-                "role": "user",
-                "content": f"Найди актуальную информацию по запросу: {query}\nОтвечай коротко и по делу, как в переписке." if lang == "ru" else f"Find current information for: {query}\nAnswer briefly and to the point."
-            }],
-            max_tokens=600, temperature=0.5
-        )
-        return response.choices[0].message.content
-    except:
+        params = {"apiKey": NEWS_API_KEY, "pageSize": 5, "language": "ru" if lang == "ru" else "en"}
+        if query:
+            params["q"] = query
+            url = "https://newsapi.org/v2/everything"
+            params["sortBy"] = "publishedAt"
+        else:
+            url = "https://newsapi.org/v2/top-headlines"
+            params["country"] = "ru" if lang == "ru" else "us"
+        async with httpx.AsyncClient(timeout=10) as http:
+            response = await http.get(url, params=params)
+        data = response.json()
+        if data.get("status") != "ok" or not data.get("articles"):
+            return None
+        lines = []
+        for i, a in enumerate(data["articles"][:5], 1):
+            title = a.get("title", "").split(" - ")[0]
+            if title and title != "[Removed]":
+                lines.append(f"{i}. {title}")
+        if not lines:
+            return None
+        header = f"Новости по запросу «{query}»:" if query and lang == "ru" else f"News for «{query}»:" if query else "Свежие новости:" if lang == "ru" else "Latest news:"
+        return f"{header}\n\n" + "\n\n".join(lines)
+    except Exception as e:
+        logging.error(f"Ошибка новостей: {e}")
+        return None
+
+async def generate_image(prompt):
+    try:
+        response = ai_client.images.generate(model="dall-e-3", prompt=prompt, size="1024x1024", n=1)
+        return response.data[0].url
+    except Exception as e:
+        logging.error(f"Ошибка генерации изображения: {e}")
         return None
 
 def calculate_sleep_times(wake_hour, wake_minute):
@@ -553,36 +547,24 @@ def calculate_sleep_times(wake_hour, wake_minute):
 
 async def get_ai_recipe(lang="ru"):
     try:
-        prompt = "Suggest one simple recipe. Name, ingredients and brief method. Be conversational." if lang == "en" else "Предложи один простой рецепт. Название, ингредиенты и краткий способ. Пиши по-человечески."
-        response = ai_client.chat.completions.create(
-            model="gpt-4o-mini",
-            messages=[{"role": "system", "content": prompt}, {"role": "user", "content": "Рецепт" if lang == "ru" else "Recipe"}],
-            max_tokens=400, temperature=0.9
-        )
+        prompt = "Suggest one simple recipe. Name, ingredients and brief method. Conversational." if lang == "en" else "Предложи один простой рецепт. Название, ингредиенты и краткий способ. По-человечески."
+        response = ai_client.chat.completions.create(model="gpt-4o-mini", messages=[{"role": "system", "content": prompt}, {"role": "user", "content": "Рецепт" if lang == "ru" else "Recipe"}], max_tokens=400, temperature=0.9)
         return response.choices[0].message.content
     except:
         return "Рецепт недоступен." if lang == "ru" else "Recipe unavailable."
 
 async def get_ai_movie(lang="ru"):
     try:
-        prompt = "Recommend one movie or series. Title, genre, brief description, why to watch. Be conversational." if lang == "en" else "Посоветуй один фильм или сериал. Название, жанр, описание, почему стоит. По-человечески."
-        response = ai_client.chat.completions.create(
-            model="gpt-4o-mini",
-            messages=[{"role": "system", "content": prompt}, {"role": "user", "content": "Что посмотреть?" if lang == "ru" else "What to watch?"}],
-            max_tokens=250, temperature=0.9
-        )
+        prompt = "Recommend one movie or series. Title, genre, brief description, why to watch. Conversational." if lang == "en" else "Посоветуй один фильм или сериал. Название, жанр, описание, почему стоит. По-человечески."
+        response = ai_client.chat.completions.create(model="gpt-4o-mini", messages=[{"role": "system", "content": prompt}, {"role": "user", "content": "Что посмотреть?" if lang == "ru" else "What to watch?"}], max_tokens=250, temperature=0.9)
         return response.choices[0].message.content
     except:
         return "Рекомендация недоступна." if lang == "ru" else "Recommendation unavailable."
 
 async def rephrase_reminder(text, lang="ru"):
     try:
-        system = "Rephrase as a reminder — brief, no 'me', no 'remind', no time. Just essence. Reply with only the text." if lang == "en" else "Перефразируй как напоминание — коротко, без 'мне', без 'напомни', без времени. Только суть."
-        response = ai_client.chat.completions.create(
-            model="gpt-4o-mini",
-            messages=[{"role": "system", "content": system}, {"role": "user", "content": text}],
-            max_tokens=80, temperature=0.3
-        )
+        system = "Rephrase as a reminder — brief, no 'me', no 'remind', no time. Just essence." if lang == "en" else "Перефразируй как напоминание — коротко, без 'мне', без 'напомни', без времени. Только суть."
+        response = ai_client.chat.completions.create(model="gpt-4o-mini", messages=[{"role": "system", "content": system}, {"role": "user", "content": text}], max_tokens=80, temperature=0.3)
         result = response.choices[0].message.content.strip()
         return result[0].upper() + result[1:] if result else text
     except:
@@ -590,16 +572,10 @@ async def rephrase_reminder(text, lang="ru"):
 
 async def analyze_image(image_data, user_question, lang="ru"):
     try:
-        prompt = user_question if user_question else ("Опиши что на этом фото" if lang == "ru" else "Describe what's in this photo")
+        prompt = user_question if user_question else ("Опиши что на этом фото подробно" if lang == "ru" else "Describe what's in this photo in detail")
         response = ai_client.chat.completions.create(
             model="gpt-4o-mini",
-            messages=[{
-                "role": "user",
-                "content": [
-                    {"type": "text", "text": prompt},
-                    {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{image_data}"}}
-                ]
-            }],
+            messages=[{"role": "user", "content": [{"type": "text", "text": prompt}, {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{image_data}"}}]}],
             max_tokens=600
         )
         return response.choices[0].message.content
@@ -637,14 +613,24 @@ def extract_relative_time(text):
     return None, None
 
 def is_reminder_request(text):
-    kw_ru = ["напомни", "напоминание", "пришли напоминание", "отправь напоминание"]
+    kw_ru = ["напомни", "напоминание", "пришли напоминание"]
     kw_en = ["remind me", "set a reminder", "reminder"]
     has_time = re.search(r'\d{1,2}[:.]\d{2}', text) or re.search(r'через\s+\d+|in\s+\d+', text, re.IGNORECASE)
     return has_time and (any(k in text.lower() for k in kw_ru) or any(k in text.lower() for k in kw_en))
 
-def is_search_request(text):
-    kw_ru = ["найди", "найти", "поищи", "что такое", "кто такой", "расскажи про", "последние новости", "актуальный", "сейчас происходит"]
-    kw_en = ["search for", "find", "what is", "who is", "tell me about", "latest news", "current"]
+def is_news_request(text):
+    kw_ru = ["новост", "что случилось", "что происходит", "последние события", "в мире сейчас", "расскажи новости"]
+    kw_en = ["news", "what happened", "latest events", "current events"]
+    return any(k in text.lower() for k in kw_ru) or any(k in text.lower() for k in kw_en)
+
+def is_image_gen_request(text):
+    kw_ru = ["нарисуй", "сгенерируй картинку", "создай изображение", "сделай картинку"]
+    kw_en = ["draw", "generate image", "create image", "make a picture"]
+    return any(k in text.lower() for k in kw_ru) or any(k in text.lower() for k in kw_en)
+
+def is_change_style_request(text):
+    kw_ru = ["измени стиль", "смени стиль", "общайся как", "хочу чтобы ты общалась", "перейди на", "говори со мной как"]
+    kw_en = ["change style", "communicate as", "talk to me as", "switch to style"]
     return any(k in text.lower() for k in kw_ru) or any(k in text.lower() for k in kw_en)
 
 async def send_scheduled_reminder(context: ContextTypes.DEFAULT_TYPE):
@@ -674,8 +660,7 @@ async def send_morning_plan(context: ContextTypes.DEFAULT_TYPE):
     reminders = await get_reminders(user_id)
     text = t(lang, "morning", name=name)
     if user.get("morning_motivation"):
-        quote = random.choice(MOTIVATIONAL_QUOTES[lang])
-        text += f"{quote}\n\n"
+        text += f"{random.choice(MOTIVATIONAL_QUOTES[lang])}\n\n"
     if user.get("morning_weather"):
         weather = await get_weather(city, lang)
         text += f"{weather}\n\n"
@@ -696,12 +681,10 @@ async def send_evening_news(context: ContextTypes.DEFAULT_TYPE):
     lang = user.get("language", "ru")
     dt = get_current_datetime(user.get("timezone", "Europe/Moscow"))
     try:
-        prompt = f"Составь короткую вечернюю сводку для {name}. Сегодня {dt['ru']}. Тёплое приветствие, пара полезных советов на вечер (сон, отдых, здоровье), мотивирующее завершение. Пиши по-человечески, 3-4 абзаца, без форматирования." if lang == "ru" else f"Create a short evening summary for {name}. Today is {dt['en']}. Warm greeting, couple of evening tips (sleep, rest, health), motivating end. Natural tone, 3-4 paragraphs."
-        response = ai_client.chat.completions.create(
-            model="gpt-4o-mini",
-            messages=[{"role": "user", "content": prompt}],
-            max_tokens=400, temperature=0.8
-        )
+        news = await get_news(lang=lang)
+        news_block = f"\n\nСвежие новости:\n{news}" if news else ""
+        prompt = f"Составь короткую вечернюю сводку для {name}. Сегодня {dt['ru']}.{news_block}\n\nВключи: тёплое приветствие, пару полезных советов на вечер, мотивирующее завершение. По-человечески, 3-4 абзаца, без форматирования." if lang == "ru" else f"Create a short evening summary for {name}. Today is {dt['en']}.{news_block}\n\nInclude: warm greeting, evening tips, motivating end. Natural, 3-4 paragraphs."
+        response = ai_client.chat.completions.create(model="gpt-4o-mini", messages=[{"role": "user", "content": prompt}], max_tokens=500, temperature=0.8)
         await context.bot.send_message(chat_id=user_id, text=response.choices[0].message.content)
     except Exception as e:
         logging.error(f"Ошибка вечерней сводки: {e}")
@@ -711,12 +694,14 @@ def get_main_menu(lang="ru"):
         keyboard = [
             [InlineKeyboardButton("🌅 Morning", callback_data="menu_morning"), InlineKeyboardButton("💪 Habits", callback_data="menu_habits")],
             [InlineKeyboardButton("💧 Water", callback_data="menu_water"), InlineKeyboardButton("📒 Diary", callback_data="menu_diary")],
+            [InlineKeyboardButton("📰 News", callback_data="menu_news"), InlineKeyboardButton("🛒 Shopping", callback_data="menu_shopping")],
             [InlineKeyboardButton("👤 Profile", callback_data="menu_profile"), InlineKeyboardButton("⚙️ Settings", callback_data="menu_settings")],
         ]
     else:
         keyboard = [
             [InlineKeyboardButton("🌅 Утро", callback_data="menu_morning"), InlineKeyboardButton("💪 Привычки", callback_data="menu_habits")],
             [InlineKeyboardButton("💧 Вода", callback_data="menu_water"), InlineKeyboardButton("📒 Дневник", callback_data="menu_diary")],
+            [InlineKeyboardButton("📰 Новости", callback_data="menu_news"), InlineKeyboardButton("🛒 Покупки", callback_data="menu_shopping")],
             [InlineKeyboardButton("👤 Профиль", callback_data="menu_profile"), InlineKeyboardButton("⚙️ Настройки", callback_data="menu_settings")],
         ]
     return InlineKeyboardMarkup(keyboard)
@@ -751,7 +736,8 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if query.data == "menu_morning":
         keyboard = [
             [InlineKeyboardButton("📋 План на день" if ru else "📋 Day plan", callback_data="morning_plan")],
-            [InlineKeyboardButton("🌤 Погода" if ru else "🌤 Weather", callback_data="morning_weather_btn")],
+            [InlineKeyboardButton("🌤 Погода сейчас" if ru else "🌤 Weather now", callback_data="morning_weather_btn")],
+            [InlineKeyboardButton("🕐 Почасовой прогноз" if ru else "🕐 Hourly forecast", callback_data="morning_hourly")],
             [InlineKeyboardButton("🌦 Прогноз на неделю" if ru else "🌦 Weekly forecast", callback_data="morning_forecast")],
             [InlineKeyboardButton("🧘 Мотивация" if ru else "🧘 Motivation", callback_data="morning_motivation")],
             [InlineKeyboardButton("◀️ Назад" if ru else "◀️ Back", callback_data="back_main")],
@@ -769,27 +755,57 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup([[back]]))
 
     elif query.data == "morning_weather_btn":
-        await query.edit_message_text(f"{'Получаю погоду для' if ru else 'Getting weather for'} {city}...")
+        await query.edit_message_text("Получаю погоду..." if ru else "Getting weather...")
         weather = await get_weather(city, lang)
         back = InlineKeyboardButton("◀️ Назад" if ru else "◀️ Back", callback_data="menu_morning")
         await query.edit_message_text(weather, reply_markup=InlineKeyboardMarkup([[back]]))
 
+    elif query.data == "morning_hourly":
+        await query.edit_message_text("Получаю почасовой прогноз..." if ru else "Getting hourly forecast...")
+        hourly = await get_weather_hourly(city, lang)
+        back = InlineKeyboardButton("◀️ Назад" if ru else "◀️ Back", callback_data="menu_morning")
+        text = hourly if hourly else ("Прогноз недоступен." if ru else "Forecast unavailable.")
+        await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup([[back]]))
+
     elif query.data == "morning_forecast":
-        await query.edit_message_text(f"{'Получаю прогноз для' if ru else 'Getting forecast for'} {city}...")
+        await query.edit_message_text("Получаю прогноз на неделю..." if ru else "Getting weekly forecast...")
         forecast = await get_weather_forecast(city, lang)
         back = InlineKeyboardButton("◀️ Назад" if ru else "◀️ Back", callback_data="menu_morning")
-        if forecast:
-            await query.edit_message_text(f"{'Прогноз для' if ru else 'Forecast for'} {city}:\n\n{forecast}", reply_markup=InlineKeyboardMarkup([[back]]))
-        else:
-            await query.edit_message_text("Прогноз недоступен." if ru else "Forecast unavailable.", reply_markup=InlineKeyboardMarkup([[back]]))
+        text = forecast if forecast else ("Прогноз недоступен." if ru else "Forecast unavailable.")
+        await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup([[back]]))
 
     elif query.data == "morning_motivation":
         quote = random.choice(MOTIVATIONAL_QUOTES[lang])
-        keyboard = [
-            [InlineKeyboardButton("🔄 Ещё" if ru else "🔄 Another", callback_data="morning_motivation")],
-            [InlineKeyboardButton("◀️ Назад" if ru else "◀️ Back", callback_data="menu_morning")],
-        ]
+        keyboard = [[InlineKeyboardButton("🔄 Ещё" if ru else "🔄 Another", callback_data="morning_motivation")], [InlineKeyboardButton("◀️ Назад" if ru else "◀️ Back", callback_data="menu_morning")]]
         await query.edit_message_text(f"{'Мотивация дня' if ru else 'Motivation'}:\n\n{quote}", reply_markup=InlineKeyboardMarkup(keyboard))
+
+    elif query.data == "menu_news":
+        await query.edit_message_text("Загружаю новости..." if ru else "Loading news...")
+        news = await get_news(lang=lang)
+        keyboard = [[InlineKeyboardButton("🔄 Обновить" if ru else "🔄 Refresh", callback_data="menu_news")], [InlineKeyboardButton("◀️ Назад" if ru else "◀️ Back", callback_data="back_main")]]
+        text = news if news else ("Новости временно недоступны." if ru else "News temporarily unavailable.")
+        await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard))
+
+    elif query.data == "menu_shopping":
+        async with db_pool.acquire() as conn:
+            items = await conn.fetch("SELECT id, item, done FROM shopping_list WHERE user_id = $1 ORDER BY created_at", user_id)
+        if items:
+            lines = [f"{'✅' if i['done'] else '⬜'} {i['item']}" for i in items]
+            text = ("Список покупок:\n\n" if ru else "Shopping list:\n\n") + "\n".join(lines)
+        else:
+            text = "Список покупок пуст.\n\nНапишите что добавить!" if ru else "Shopping list is empty.\n\nWrite what to add!"
+        context.user_data["waiting_shopping"] = True
+        keyboard = [
+            [InlineKeyboardButton("🗑 Очистить" if ru else "🗑 Clear", callback_data="shopping_clear")],
+            [InlineKeyboardButton("◀️ Назад" if ru else "◀️ Back", callback_data="back_main")],
+        ]
+        await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard))
+
+    elif query.data == "shopping_clear":
+        async with db_pool.acquire() as conn:
+            await conn.execute("DELETE FROM shopping_list WHERE user_id = $1", user_id)
+        back = InlineKeyboardButton("◀️ Назад" if ru else "◀️ Back", callback_data="menu_shopping")
+        await query.edit_message_text("Список покупок очищен!" if ru else "Shopping list cleared!", reply_markup=InlineKeyboardMarkup([[back]]))
 
     elif query.data == "menu_habits":
         async with db_pool.acquire() as conn:
@@ -806,7 +822,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif query.data == "habit_add":
         context.user_data["waiting_habit"] = True
         back = InlineKeyboardButton("◀️ Отмена" if ru else "◀️ Cancel", callback_data="menu_habits")
-        await query.edit_message_text("Напишите название привычки\n\nНапример: Медитация, Чтение, Зарядка" if ru else "Write the habit name\n\nFor example: Meditation, Reading, Exercise", reply_markup=InlineKeyboardMarkup([[back]]))
+        await query.edit_message_text("Напишите название привычки\n\nНапример: Медитация, Чтение, Зарядка" if ru else "Write the habit name", reply_markup=InlineKeyboardMarkup([[back]]))
 
     elif query.data == "habit_log":
         async with db_pool.acquire() as conn:
@@ -956,6 +972,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             text = f"Мой профиль\n\nИмя: {name}\nГород: {city}\nЧасовой пояс: {tz}\nЯзык: Русский 🇷🇺\nСтиль общения: {comm}\nДней с нами: {days}\nСообщений: {total_msg}\nПривычек: {habits_count}\nБаланс за месяц: {balance:.0f}"
             keyboard = [
                 [InlineKeyboardButton("🌍 Изменить город", callback_data="profile_city")],
+                [InlineKeyboardButton("💬 Сменить стиль общения", callback_data="change_comm_style")],
                 [InlineKeyboardButton("🌐 Switch to English 🇬🇧", callback_data="switch_lang_en")],
                 [InlineKeyboardButton("🗑 Забудь всё обо мне", callback_data="confirm_forget")],
                 [InlineKeyboardButton("◀️ Назад", callback_data="back_main")],
@@ -964,29 +981,52 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             text = f"My profile\n\nName: {name}\nCity: {city}\nTimezone: {tz}\nLanguage: English 🇬🇧\nCommunication style: {comm}\nDays with us: {days}\nMessages: {total_msg}\nHabits: {habits_count}\nBalance this month: {balance:.0f}"
             keyboard = [
                 [InlineKeyboardButton("🌍 Change city", callback_data="profile_city")],
+                [InlineKeyboardButton("💬 Change communication style", callback_data="change_comm_style")],
                 [InlineKeyboardButton("🌐 Switch to Russian 🇷🇺", callback_data="switch_lang_ru")],
                 [InlineKeyboardButton("🗑 Forget everything about me", callback_data="confirm_forget")],
                 [InlineKeyboardButton("◀️ Back", callback_data="back_main")],
             ]
         await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard))
 
+    elif query.data == "change_comm_style":
+        if ru:
+            keyboard = [
+                [InlineKeyboardButton("👭 Подружка — на ты, тепло", callback_data="set_style_подружка")],
+                [InlineKeyboardButton("🎯 Наставник — на вы, мотивирующий", callback_data="set_style_наставник")],
+                [InlineKeyboardButton("💼 Профессионал — чётко и по делу", callback_data="set_style_профессионал")],
+                [InlineKeyboardButton("◀️ Назад", callback_data="menu_profile")],
+            ]
+            await query.edit_message_text("Выберите стиль общения:", reply_markup=InlineKeyboardMarkup(keyboard))
+        else:
+            keyboard = [
+                [InlineKeyboardButton("👭 Friend — casual, informal", callback_data="set_style_friend")],
+                [InlineKeyboardButton("🎯 Mentor — motivating, formal", callback_data="set_style_mentor")],
+                [InlineKeyboardButton("💼 Professional — clear, concise", callback_data="set_style_professional")],
+                [InlineKeyboardButton("◀️ Back", callback_data="menu_profile")],
+            ]
+            await query.edit_message_text("Choose communication style:", reply_markup=InlineKeyboardMarkup(keyboard))
+
+    elif query.data.startswith("set_style_"):
+        style = query.data.replace("set_style_", "")
+        await save_user(user_id, comm_style=style)
+        await save_memory_item(user_id, "стиль_общения", style)
+        back = InlineKeyboardButton("◀️ Назад" if ru else "◀️ Back", callback_data="menu_profile")
+        style_names = {"подружка": "Подружка 👭", "наставник": "Наставник 🎯", "профессионал": "Профессионал 💼", "friend": "Friend 👭", "mentor": "Mentor 🎯", "professional": "Professional 💼"}
+        style_name = style_names.get(style, style)
+        text = f"Стиль общения изменён: {style_name}" if ru else f"Communication style changed: {style_name}"
+        await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup([[back]]))
+
     elif query.data == "confirm_forget":
         keyboard = [
             [InlineKeyboardButton("🗑 Да, удалить всё" if ru else "🗑 Yes, delete everything", callback_data="do_forget")],
             [InlineKeyboardButton("❌ Отмена" if ru else "❌ Cancel", callback_data="menu_profile")],
         ]
-        await query.edit_message_text("Вы уверены? Это удалит всю историю, заметки, напоминания и личные данные. Отменить нельзя." if ru else "Are you sure? This will delete all history, notes, reminders and personal data. Cannot be undone.", reply_markup=InlineKeyboardMarkup(keyboard))
+        await query.edit_message_text("Вы уверены? Это удалит всю историю, заметки, напоминания и личные данные." if ru else "Are you sure? This will delete all history, notes, reminders and personal data.", reply_markup=InlineKeyboardMarkup(keyboard))
 
     elif query.data == "do_forget":
         async with db_pool.acquire() as conn:
-            await conn.execute("DELETE FROM history WHERE user_id = $1", user_id)
-            await conn.execute("DELETE FROM reminders WHERE user_id = $1", user_id)
-            await conn.execute("DELETE FROM notes WHERE user_id = $1", user_id)
-            await conn.execute("DELETE FROM habits WHERE user_id = $1", user_id)
-            await conn.execute("DELETE FROM habit_logs WHERE user_id = $1", user_id)
-            await conn.execute("DELETE FROM finances WHERE user_id = $1", user_id)
-            await conn.execute("DELETE FROM user_memory WHERE user_id = $1", user_id)
-            await conn.execute("DELETE FROM sleep_logs WHERE user_id = $1", user_id)
+            for tbl in ["history", "reminders", "notes", "habits", "habit_logs", "finances", "user_memory", "sleep_logs", "shopping_list"]:
+                await conn.execute(f"DELETE FROM {tbl} WHERE user_id = $1", user_id)
             await conn.execute("UPDATE users SET onboarded = FALSE, name = NULL WHERE user_id = $1", user_id)
         await query.edit_message_text(t(lang, "memory_cleared"))
 
@@ -1216,7 +1256,7 @@ async def handle_comm_style(update: Update, context: ContextTypes.DEFAULT_TYPE):
         style = text.strip()[:50]
     await save_user(user_id, comm_style=style)
     await save_memory_item(user_id, "стиль_общения", style)
-    confirm = f"Отлично, запомнила стиль! Теперь буду общаться как {style} 🌸" if lang == "ru" else f"Got it! I'll communicate as your {style} 🌸"
+    confirm = f"Отлично, запомнила! Стиль: {style} 🌸" if lang == "ru" else f"Got it! Style: {style} 🌸"
     await update.message.reply_text(confirm, reply_markup=ReplyKeyboardRemove())
     return await finish_onboarding_final(update, context)
 
@@ -1253,11 +1293,41 @@ async def process_text_message(update: Update, context: ContextTypes.DEFAULT_TYP
     user_name = update.effective_user.first_name or "Пользователь"
     username = update.effective_user.username or "нет username"
 
+    # Смена стиля через чат
+    if is_change_style_request(user_text):
+        text_lower = user_text.lower()
+        if "подруж" in text_lower or "friend" in text_lower or "на ты" in text_lower:
+            new_style = "подружка" if ru else "friend"
+        elif "наставник" in text_lower or "mentor" in text_lower or "на вы" in text_lower:
+            new_style = "наставник" if ru else "mentor"
+        elif "профессионал" in text_lower or "professional" in text_lower:
+            new_style = "профессионал" if ru else "professional"
+        else:
+            new_style = None
+        if new_style:
+            await save_user(user_id, comm_style=new_style)
+            await save_memory_item(user_id, "стиль_общения", new_style)
+            reply = f"Стиль изменён на «{new_style}»! Теперь буду общаться именно так 🌸" if ru else f"Style changed to «{new_style}»! I'll communicate that way now 🌸"
+            await update.message.reply_text(reply)
+            await notify_admin(context, user_name, username, user_text, reply)
+            return
+
     if context.user_data.get("waiting_habit"):
         context.user_data["waiting_habit"] = False
         async with db_pool.acquire() as conn:
             await conn.execute("INSERT INTO habits (user_id, name) VALUES ($1, $2)", user_id, user_text)
         await update.message.reply_text(f"Привычка '{user_text}' добавлена!" if ru else f"Habit '{user_text}' added!")
+        return
+
+    if context.user_data.get("waiting_shopping"):
+        context.user_data["waiting_shopping"] = False
+        items = [i.strip() for i in re.split(r'[,\n;]', user_text) if i.strip()]
+        async with db_pool.acquire() as conn:
+            for item in items:
+                await conn.execute("INSERT INTO shopping_list (user_id, item) VALUES ($1, $2)", user_id, item)
+        count = len(items)
+        reply = f"Добавлено {count} {'позиция' if count == 1 else 'позиций'} в список покупок!" if ru else f"Added {count} item{'s' if count > 1 else ''} to shopping list!"
+        await update.message.reply_text(reply)
         return
 
     if context.user_data.get("waiting_city"):
@@ -1299,6 +1369,36 @@ async def process_text_message(update: Update, context: ContextTypes.DEFAULT_TYP
     await context.bot.send_chat_action(chat_id=update.effective_chat.id, action="typing")
 
     try:
+        # Генерация изображений
+        if is_image_gen_request(user_text):
+            await context.bot.send_chat_action(chat_id=update.effective_chat.id, action="upload_photo")
+            prompt = user_text
+            for kw in ["нарисуй", "сгенерируй картинку", "создай изображение", "сделай картинку", "draw", "generate image", "create image"]:
+                prompt = re.sub(kw, "", prompt, flags=re.IGNORECASE).strip()
+            msg = "Генерирую изображение, подождите..." if ru else "Generating image, please wait..."
+            sent_msg = await update.message.reply_text(msg)
+            image_url = await generate_image(prompt)
+            if image_url:
+                await context.bot.send_photo(chat_id=update.effective_chat.id, photo=image_url)
+                await notify_admin(context, user_name, username, user_text, "[Сгенерировано изображение]")
+            else:
+                await update.message.reply_text("Не удалось сгенерировать изображение." if ru else "Could not generate image.")
+            return
+
+        # Новости
+        if is_news_request(user_text):
+            query_text = None
+            for kw in ["новости про", "новости о", "news about", "news on"]:
+                if kw in user_text.lower():
+                    query_text = user_text.lower().split(kw)[-1].strip()
+                    break
+            news = await get_news(query=query_text, lang=lang)
+            if news:
+                await update.message.reply_text(news)
+                await notify_admin(context, user_name, username, user_text, news[:200])
+                return
+
+        # Напоминания
         if is_reminder_request(user_text):
             tz = pytz.timezone(user["timezone"] or "Europe/Moscow")
             now = datetime.now(tz)
@@ -1331,19 +1431,9 @@ async def process_text_message(update: Update, context: ContextTypes.DEFAULT_TYP
         memory_block = f"\n\nЧто я знаю об этом пользователе:\n{memory}" if memory else ""
         full_system = f"Сегодня: {date_str}\nСтиль общения: {comm_style}{memory_block}\n\n{system_prompt}" if ru else f"Today: {date_str}\nCommunication style: {comm_style}{memory_block}\n\n{system_prompt}"
 
-        extra_context = ""
-        if is_search_request(user_text) and len(user_text) > 5:
-            search_result = await web_search(user_text, lang)
-            if search_result:
-                extra_context = f"\n\n[Актуальная информация по запросу]:\n{search_result}" if ru else f"\n\n[Current information for query]:\n{search_result}"
-
-        messages = [{"role": "system", "content": full_system}] + history
-        if extra_context:
-            messages[-1]["content"] = messages[-1]["content"] + extra_context if messages[-1]["role"] == "user" else messages[-1]["content"]
-
         response = ai_client.chat.completions.create(
             model="gpt-4o-mini",
-            messages=messages,
+            messages=[{"role": "system", "content": full_system}] + history,
             max_tokens=1000, temperature=0.7
         )
         reply = response.choices[0].message.content
@@ -1456,5 +1546,5 @@ if __name__ == "__main__":
     app.add_handler(MessageHandler(filters.PHOTO, handle_photo))
     app.add_handler(MessageHandler(filters.VOICE, handle_voice))
     app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
-    print("🌸 София v4.0 запущена!")
+    print("🌸 София v5.0 запущена!")
     app.run_polling()
