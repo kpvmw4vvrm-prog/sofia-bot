@@ -749,20 +749,14 @@ async def send_evening_news(context: ContextTypes.DEFAULT_TYPE):
         logging.error(f"Ошибка вечерней сводки: {e}")
 
 def get_main_menu(lang="ru"):
-    if lang == "en":
-        keyboard = [
-            [InlineKeyboardButton("🌅 Morning", callback_data="menu_morning"), InlineKeyboardButton("💪 Habits", callback_data="menu_habits")],
-            [InlineKeyboardButton("💧 Water", callback_data="menu_water"), InlineKeyboardButton("📒 Diary", callback_data="menu_diary")],
-            [InlineKeyboardButton("✨ Interesting", callback_data="menu_interesting"), InlineKeyboardButton("🛒 Shopping", callback_data="menu_shopping")],
-            [InlineKeyboardButton("👤 Profile", callback_data="menu_profile"), InlineKeyboardButton("⚙️ Settings", callback_data="menu_settings")],
-        ]
-    else:
-        keyboard = [
-            [InlineKeyboardButton("🌅 Утро", callback_data="menu_morning"), InlineKeyboardButton("💪 Привычки", callback_data="menu_habits")],
-            [InlineKeyboardButton("💧 Вода", callback_data="menu_water"), InlineKeyboardButton("📒 Дневник", callback_data="menu_diary")],
-            [InlineKeyboardButton("✨ Интересное", callback_data="menu_interesting"), InlineKeyboardButton("🛒 Покупки", callback_data="menu_shopping")],
-            [InlineKeyboardButton("👤 Профиль", callback_data="menu_profile"), InlineKeyboardButton("⚙️ Настройки", callback_data="menu_settings")],
-        ]
+    ru = lang == "ru"
+    keyboard = [
+        [InlineKeyboardButton("🌅 Утро" if ru else "🌅 Morning", callback_data="menu_morning")],
+        [InlineKeyboardButton("📒 Дневник" if ru else "📒 Diary", callback_data="menu_diary")],
+        [InlineKeyboardButton("✨ Интересное" if ru else "✨ Interesting", callback_data="menu_interesting")],
+        [InlineKeyboardButton("⚙️ Настройки" if ru else "⚙️ Settings", callback_data="menu_settings")],
+        [InlineKeyboardButton("✖️ Закрыть меню" if ru else "✖️ Close menu", callback_data="close_menu")],
+    ]
     return InlineKeyboardMarkup(keyboard)
 
 async def show_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
