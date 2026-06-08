@@ -495,51 +495,84 @@ async def get_weather_forecast(city, lang="ru"):
     except:
         return None
 
-async def get_news(query=None, lang="ru"):
+INTERESTING_QUERIES = {
+    "science": {"query": "science discovery research breakthrough", "ru": "🔬 Научные открытия", "en": "🔬 Science Discoveries"},
+    "technology": {"query": "technology AI innovation future", "ru": "💻 Технологии и ИИ", "en": "💻 Technology & AI"},
+    "health": {"query": "health wellness longevity medicine", "ru": "💚 Здоровье и долголетие", "en": "💚 Health & Wellness"},
+    "inspiration": {"query": "inspiring success achievement positive story", "ru": "✨ Вдохновляющие истории", "en": "✨ Inspiring Stories"},
+}
+
+async def fetch_articles(query, count=10):
     if not NEWS_API_KEY:
-        return None
+        return []
     try:
-        # Всегда берём английские новости (бесплатный план не поддерживает ru)
-        params = {"apiKey": NEWS_API_KEY, "pageSize": 5, "language": "en"}
-        if query:
-            params["q"] = query
-            url = "https://newsapi.org/v2/everything"
-            params["sortBy"] = "publishedAt"
-        else:
-            url = "https://newsapi.org/v2/top-headlines"
-            params["country"] = "us"
+        params = {"apiKey": NEWS_API_KEY, "q": query, "language": "en", "pageSize": count, "sortBy": "publishedAt"}
         async with httpx.AsyncClient(timeout=10) as http:
-            response = await http.get(url, params=params)
+            response = await http.get("https://newsapi.org/v2/everything", params=params)
         data = response.json()
         if data.get("status") != "ok" or not data.get("articles"):
-            return None
-        titles = []
-        for a in data["articles"][:5]:
-            title = a.get("title", "").split(" - ")[0]
-            if title and title != "[Removed]":
-                titles.append(title)
-        if not titles:
-            return None
-        # Если русский язык — переводим через AI
-        if lang == "ru":
-            titles_text = "\n".join([f"{i+1}. {t}" for i, t in enumerate(titles)])
-            try:
-                resp = ai_client.chat.completions.create(
-                    model="gpt-4o-mini",
-                    messages=[{"role": "system", "content": "Переведи заголовки новостей на русский язык. Отвечай только переведёнными заголовками с номерами, без лишнего текста."}, {"role": "user", "content": titles_text}],
-                    max_tokens=400, temperature=0.3
-                )
-                translated = resp.choices[0].message.content.strip()
-                header = f"Новости по запросу «{query}»:" if query else "Свежие новости:"
-                return f"{header}\n\n{translated}"
-            except:
-                pass
-        lines = [f"{i+1}. {t}" for i, t in enumerate(titles)]
-        header = f"News for «{query}»:" if query else "Latest news:"
-        return f"{header}\n\n" + "\n\n".join(lines)
+            return []
+        articles = []
+        for a in data["articles"]:
+            title = a.get("title", "").split(" - ")[0].strip()
+            desc = a.get("description") or ""
+            url = a.get("url") or ""
+            if title and title != "[Removed]" and len(title) > 10:
+                articles.append({"title": title, "description": desc, "url": url})
+        return articles[:count]
     except Exception as e:
-        logging.error(f"Ошибка новостей: {e}")
+        logging.error(f"Ошибка fetch_articles: {e}")
+        return []
+
+async def translate_titles(titles, lang="ru"):
+    if lang != "ru":
+        return titles
+    try:
+        text = "\n".join([f"{i+1}. {t}" for i, t in enumerate(titles)])
+        resp = ai_client.chat.completions.create(
+            model="gpt-4o-mini",
+            messages=[
+                {"role": "system", "content": "Переведи заголовки на русский. Отвечай ТОЛЬКО строками вида: 1. Заголовок"},
+                {"role": "user", "content": text}
+            ],
+            max_tokens=800, temperature=0.1
+        )
+        result = resp.choices[0].message.content.strip()
+        translated = []
+        for line in result.split("\n"):
+            line = line.strip()
+            if line and line[0].isdigit() and ". " in line:
+                translated.append(line.split(". ", 1)[1].strip())
+        return translated if len(translated) == len(titles) else titles
+    except:
+        return titles
+
+async def get_article_details(article, lang="ru"):
+    try:
+        title = article.get("title", "")
+        desc = article.get("description", "")
+        url = article.get("url", "")
+        prompt = f"Расскажи подробнее об этой теме: {title}. {desc}\n\nНапиши интересный рассказ на 3-4 абзаца по-человечески, без форматирования." if lang == "ru" else f"Tell more about: {title}. {desc}\n\nWrite 3-4 interesting paragraphs, conversational."
+        resp = ai_client.chat.completions.create(
+            model="gpt-4o-mini",
+            messages=[{"role": "user", "content": prompt}],
+            max_tokens=600, temperature=0.7
+        )
+        summary = resp.choices[0].message.content.strip()
+        if url:
+            link = "Читать оригинал" if lang == "ru" else "Read original"
+            return f"{summary}\n\n🔗 {link}: {url}"
+        return summary
+    except:
+        return article.get("description") or ("Описание недоступно." if lang == "ru" else "Unavailable.")
+
+async def get_news(query=None, lang="ru"):
+    articles = await fetch_articles(query or "positive world news", 5)
+    if not articles:
         return None
+    titles = [a["title"] for a in articles]
+    translated = await translate_titles(titles, lang)
+    return "\n".join([f"{i+1}. {t}" for i, t in enumerate(translated)])
 
 async def generate_image(prompt):
     try:
@@ -715,14 +748,14 @@ def get_main_menu(lang="ru"):
         keyboard = [
             [InlineKeyboardButton("🌅 Morning", callback_data="menu_morning"), InlineKeyboardButton("💪 Habits", callback_data="menu_habits")],
             [InlineKeyboardButton("💧 Water", callback_data="menu_water"), InlineKeyboardButton("📒 Diary", callback_data="menu_diary")],
-            [InlineKeyboardButton("📰 News", callback_data="menu_news"), InlineKeyboardButton("🛒 Shopping", callback_data="menu_shopping")],
+            [InlineKeyboardButton("✨ Interesting", callback_data="menu_interesting"), InlineKeyboardButton("🛒 Shopping", callback_data="menu_shopping")],
             [InlineKeyboardButton("👤 Profile", callback_data="menu_profile"), InlineKeyboardButton("⚙️ Settings", callback_data="menu_settings")],
         ]
     else:
         keyboard = [
             [InlineKeyboardButton("🌅 Утро", callback_data="menu_morning"), InlineKeyboardButton("💪 Привычки", callback_data="menu_habits")],
             [InlineKeyboardButton("💧 Вода", callback_data="menu_water"), InlineKeyboardButton("📒 Дневник", callback_data="menu_diary")],
-            [InlineKeyboardButton("📰 Новости", callback_data="menu_news"), InlineKeyboardButton("🛒 Покупки", callback_data="menu_shopping")],
+            [InlineKeyboardButton("✨ Интересное", callback_data="menu_interesting"), InlineKeyboardButton("🛒 Покупки", callback_data="menu_shopping")],
             [InlineKeyboardButton("👤 Профиль", callback_data="menu_profile"), InlineKeyboardButton("⚙️ Настройки", callback_data="menu_settings")],
         ]
     return InlineKeyboardMarkup(keyboard)
@@ -800,11 +833,38 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         keyboard = [[InlineKeyboardButton("🔄 Ещё" if ru else "🔄 Another", callback_data="morning_motivation")], [InlineKeyboardButton("◀️ Назад" if ru else "◀️ Back", callback_data="menu_morning")]]
         await query.edit_message_text(f"{'Мотивация дня' if ru else 'Motivation'}:\n\n{quote}", reply_markup=InlineKeyboardMarkup(keyboard))
 
-    elif query.data == "menu_news":
-        await query.edit_message_text("Загружаю новости..." if ru else "Loading news...")
-        news = await get_news(lang=lang)
-        keyboard = [[InlineKeyboardButton("🔄 Обновить" if ru else "🔄 Refresh", callback_data="menu_news")], [InlineKeyboardButton("◀️ Назад" if ru else "◀️ Back", callback_data="back_main")]]
-        text = news if news else ("Новости временно недоступны." if ru else "News temporarily unavailable.")
+    elif query.data == "menu_interesting":
+        keyboard = [
+            [InlineKeyboardButton("🔬 Научные открытия" if ru else "🔬 Science Discoveries", callback_data="interesting_science")],
+            [InlineKeyboardButton("💻 Технологии и ИИ" if ru else "💻 Technology & AI", callback_data="interesting_technology")],
+            [InlineKeyboardButton("💚 Здоровье и долголетие" if ru else "💚 Health & Wellness", callback_data="interesting_health")],
+            [InlineKeyboardButton("✨ Вдохновляющие истории" if ru else "✨ Inspiring Stories", callback_data="interesting_inspiration")],
+            [InlineKeyboardButton("◀️ Назад" if ru else "◀️ Back", callback_data="back_main")],
+        ]
+        await query.edit_message_text("Интересное — выберите тему:" if ru else "Interesting — choose a topic:", reply_markup=InlineKeyboardMarkup(keyboard))
+
+    elif query.data.startswith("interesting_"):
+        category = query.data.replace("interesting_", "")
+        cat_info = INTERESTING_QUERIES.get(category, {})
+        title = cat_info.get("ru" if ru else "en", "Интересное")
+        await query.edit_message_text(f"Загружаю {title}..." if ru else f"Loading {title}...")
+        articles = await fetch_articles(cat_info.get("query", "interesting news"), 10)
+        if not articles:
+            back = InlineKeyboardButton("◀️ Назад" if ru else "◀️ Back", callback_data="menu_interesting")
+            await query.edit_message_text("Материалы временно недоступны." if ru else "Content temporarily unavailable.", reply_markup=InlineKeyboardMarkup([[back]]))
+            return
+        titles = [a["title"] for a in articles]
+        translated = await translate_titles(titles, lang)
+        context.user_data[f"interesting_articles_{category}"] = articles
+        context.user_data[f"interesting_translated_{category}"] = translated
+        lines = [f"{i+1}. {t}" for i, t in enumerate(translated)]
+        text = f"{title}\n\n" + "\n".join(lines)
+        text += "\n\nНапишите цифру чтобы узнать подробнее" if ru else "\n\nType a number to read more"
+        context.user_data["waiting_interesting"] = category
+        keyboard = [
+            [InlineKeyboardButton("🔄 Обновить" if ru else "🔄 Refresh", callback_data=f"interesting_{category}")],
+            [InlineKeyboardButton("◀️ Назад" if ru else "◀️ Back", callback_data="menu_interesting")],
+        ]
         await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard))
 
     elif query.data == "menu_shopping":
@@ -1332,6 +1392,26 @@ async def process_text_message(update: Update, context: ContextTypes.DEFAULT_TYP
             await update.message.reply_text(reply)
             await notify_admin(context, user_name, username, user_text, reply)
             return
+
+    if context.user_data.get("waiting_interesting"):
+        category = context.user_data["waiting_interesting"]
+        if user_text.strip().isdigit():
+            idx = int(user_text.strip()) - 1
+            articles = context.user_data.get(f"interesting_articles_{category}", [])
+            translated = context.user_data.get(f"interesting_translated_{category}", [])
+            if 0 <= idx < len(articles):
+                context.user_data["waiting_interesting"] = None
+                await context.bot.send_chat_action(chat_id=update.effective_chat.id, action="typing")
+                title = translated[idx] if idx < len(translated) else articles[idx]["title"]
+                loading = f"Читаю про «{title}»..." if ru else f"Reading about «{title}»..."
+                await update.message.reply_text(loading)
+                details = await get_article_details(articles[idx], lang)
+                await update.message.reply_text(details)
+                return
+            else:
+                max_n = len(articles)
+                await update.message.reply_text(f"Введите число от 1 до {max_n}" if ru else f"Enter a number from 1 to {max_n}")
+                return
 
     if context.user_data.get("waiting_habit"):
         context.user_data["waiting_habit"] = False
