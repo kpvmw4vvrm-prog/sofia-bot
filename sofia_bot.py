@@ -178,7 +178,9 @@ SYSTEM_PROMPT_RU = """Ты — София, личный ассистент и н
 ЧТО УМЕЕШЬ: планирование, напоминания, поддержка, нутрициология, цели, рецепты, погода, любые вопросы.
 
 ПЛАНЕР:
-Если слышишь слова "всегда", "каждый", "каждую", "регулярно", "постоянно" + день недели + время — в конце ответа напиши: "Хотите добавить это в ваш планер? В планере хранятся фиксированные регулярные занятия — те что повторяются каждую неделю. Напишите да (и укажите время если ещё не указали) и я запишу!"
+Если слышишь слова "всегда", "каждый", "каждую", "регулярно", "постоянно", "по пятницам", "по средам" или любой день недели в контексте регулярного занятия — в конце ответа ОБЯЗАТЕЛЬНО напиши: "Хотите добавить это в ваш планер? В планере хранятся фиксированные регулярные занятия — те что повторяются каждую неделю. Напишите да и я запишу! (если не указали время — тоже уточните)"
+
+ВАЖНО: в планере ВСЕГДА нужно время. Если пользователь не указал время — после слова "да" спроси: "В какое время проходит это занятие?"
 
 РЕЦЕПТЫ:
 Когда пишешь рецепт — в конце ВСЕГДА добавляй вопрос: "Хотите сохранить этот рецепт в ваши любимые?"
@@ -1287,7 +1289,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         ]
         await query.edit_message_text("Оцените уровень стресса:\n\n1 — всё спокойно\n10 — очень высокий стресс", reply_markup=InlineKeyboardMarkup(keyboard))
 
-    elif query.data.startswith("stress_") and query.data != "stress_logs":
+    elif query.data.startswith("stress_") and query.data not in ["stress_logs", "stress_history"]:
         level = int(query.data.replace("stress_", ""))
         async with db_pool.acquire() as conn:
             await conn.execute("INSERT INTO stress_logs (user_id, level) VALUES ($1, $2)", user_id, level)
@@ -1443,13 +1445,16 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             goals_p = await conn.fetch("SELECT id, title, progress FROM goals WHERE user_id = $1", user_id)
         keyboard = [[InlineKeyboardButton(g["title"][:30] + " (" + str(g["progress"]) + "%)", callback_data="set_progress_" + str(g["id"]))] for g in goals_p]
         keyboard.append([InlineKeyboardButton("◀️ Назад", callback_data="menu_goals")])
-        await query.edit_message_text("Выберите цель:", reply_markup=InlineKeyboardMarkup(keyboard))
+        await query.edit_message_text("Выберите цель для обновления:", reply_markup=InlineKeyboardMarkup(keyboard))
 
     elif query.data.startswith("set_progress_"):
         goal_id_s = int(query.data.split("_")[-1])
         context.user_data["waiting_progress_goal_id"] = goal_id_s
+        async with db_pool.acquire() as conn:
+            g_info = await conn.fetchrow("SELECT title, progress FROM goals WHERE id = $1", goal_id_s)
         back = InlineKeyboardButton("◀️ Назад", callback_data="menu_goals")
-        await query.edit_message_text("Напишите прогресс в процентах (0-100):", reply_markup=InlineKeyboardMarkup([[back]]))
+        title_g = g_info["title"] if g_info else "Цель"
+        await query.edit_message_text("Цель: " + title_g + "\n\nРасскажите что сделали по этой цели? Я сама оценю прогресс.\n\nНапример: сходила в зал 3 раза, прочитала 50 страниц, выучила 20 слов", reply_markup=InlineKeyboardMarkup([[back]]))
 
     elif query.data == "diary_finances":
         async with db_pool.acquire() as conn:
@@ -1818,6 +1823,12 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
     user_name = update.effective_user.first_name or "Пользователь"
     username = update.effective_user.username or "нет username"
+    # Если уже онбордингован — просто открываем меню
+    existing = await get_user(user_id)
+    if existing and existing.get("onboarded"):
+        lang = existing.get("language", "ru")
+        await update.message.reply_text("🌸", reply_markup=get_main_menu(lang))
+        return ConversationHandler.END
     await save_user(user_id, username=username)
     await update.message.reply_text(t("ru", "welcome"))
     await notify_admin(context, user_name, username, f"Новый пользователь (ID: {user_id})", "Начал онбординг")
@@ -2296,12 +2307,19 @@ async def process_text_message(update: Update, context: ContextTypes.DEFAULT_TYP
     if context.user_data.get("waiting_progress_goal_id"):
         gid = context.user_data.pop("waiting_progress_goal_id")
         try:
-            prog = max(0, min(100, int(user_text.strip())))
+            async with db_pool.acquire() as conn:
+                g_data = await conn.fetchrow("SELECT title FROM goals WHERE id = $1", gid)
+            goal_title = g_data["title"] if g_data else "цель"
+            prog_prompt = "Цель: " + goal_title + "\nЧто сделано: " + user_text + "\n\nОцени прогресс в % (0-100). Ответь ТОЛЬКО числом от 0 до 100."
+            prog_resp = ai_client.chat.completions.create(model="gpt-4o-mini", messages=[{"role": "user", "content": prog_prompt}], max_tokens=10, temperature=0.1)
+            prog_text = prog_resp.choices[0].message.content.strip().replace("%", "")
+            prog = max(0, min(100, int("".join(filter(str.isdigit, prog_text)) or "0")))
             async with db_pool.acquire() as conn:
                 await conn.execute("UPDATE goals SET progress = $1 WHERE id = $2", prog, gid)
-            await update.message.reply_text("Прогресс обновлён: " + str(prog) + "% 🎯")
-        except:
-            await update.message.reply_text("Напишите число от 0 до 100")
+            await update.message.reply_text("Отлично! Прогресс по цели \"" + goal_title + "\" обновлён до " + str(prog) + "% 🎯")
+        except Exception as pe:
+            logging.error("Ошибка прогресса: " + str(pe))
+            await update.message.reply_text("Не смогла оценить. Напишите подробнее что сделали.")
         return
 
     if context.user_data.get("waiting_cycle_length"):
@@ -2441,6 +2459,30 @@ async def process_text_message(update: Update, context: ContextTypes.DEFAULT_TYP
                 await update.message.reply_text(reply_m)
                 await notify_admin(context, user_name, username, user_text, reply_m)
                 return
+
+        # Нутрициология — текстовый ввод еды
+        food_kw = ["съела", "съел", "поела", "поел", "покушала", "перекусила", "на завтрак", "на обед", "на ужин", "выпила", "выпил"]
+        async with db_pool.acquire() as conn:
+            has_nutr_txt = await conn.fetchrow("SELECT id FROM nutrition_profile WHERE user_id = $1", user_id)
+        if has_nutr_txt and any(k in user_text.lower() for k in food_kw):
+            try:
+                food_prompt = "Пользователь написал о еде: " + user_text + "\n\nОпредели КБЖУ. Отвечай ТОЛЬКО в формате:\nБлюдо: название\nКалории: число\nБелки: число\nЖиры: число\nУглеводы: число\nКомментарий: совет"
+                food_resp = ai_client.chat.completions.create(model="gpt-4o-mini", messages=[{"role": "user", "content": food_prompt}], max_tokens=200, temperature=0.3)
+                food_text_res = food_resp.choices[0].message.content
+                if "Калории:" in food_text_res:
+                    import re as _ref
+                    cal_m = _ref.search(r"Калории:\s*(\d+)", food_text_res)
+                    prot_m = _ref.search(r"Белки:\s*([\d.]+)", food_text_res)
+                    fat_m = _ref.search(r"Жиры:\s*([\d.]+)", food_text_res)
+                    carb_m = _ref.search(r"Углеводы:\s*([\d.]+)", food_text_res)
+                    dish_m = _ref.search(r"Блюдо:\s*(.+)", food_text_res)
+                    async with db_pool.acquire() as conn:
+                        await conn.execute("INSERT INTO food_logs (user_id, description, calories, protein, fat, carbs) VALUES ($1, $2, $3, $4, $5, $6)", user_id, dish_m.group(1).strip() if dish_m else user_text[:50], int(cal_m.group(1)) if cal_m else 0, float(prot_m.group(1)) if prot_m else 0, float(fat_m.group(1)) if fat_m else 0, float(carb_m.group(1)) if carb_m else 0)
+                    await update.message.reply_text(food_text_res + "\n\nЗаписала в журнал питания! 🥗")
+                    await notify_admin(context, user_name, username, user_text, food_text_res[:200])
+                    return
+            except Exception as fe:
+                logging.error("Ошибка подсчёта еды: " + str(fe))
 
         # Регулярные занятия — предлагаем планер
         regular_kw = ["всегда", "каждый ", "каждую ", "каждое ", "регулярно", "постоянно",
