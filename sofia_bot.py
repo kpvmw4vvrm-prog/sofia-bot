@@ -68,8 +68,8 @@ TEXTS = {
         "ask_morning": "Хотите чтобы я каждое утро присылала план дня?",
         "ask_morning_time": "В какое время присылать утренний план?",
         "ask_reminders": "Напоминать о делах заранее?",
-        "ask_evening_news": "Хотите получать вечернюю сводку новостей — главные события дня и полезные советы на вечер?",
-        "ask_evening_time": "В какое время присылать вечернюю сводку новостей?",
+        "ask_evening_news": "Хотите чтобы каждый вечер я присылала личный итог дня — привычки, вода, финансы, прогресс? Как колесо баланса 🌸",
+        "ask_evening_time": "В какое время присылать вечерний итог дня?",
         "ask_comm_style": "Как вам удобнее чтобы я общалась с вами?",
         "finish": "Всё готово, {name}! 🌸\n\nЯ запомнила ваши настройки. Напишите /menu чтобы открыть меню.",
         "menu_title": "Меню Софии\n\nЗдравствуйте, {name}! Чем могу помочь?",
@@ -178,7 +178,7 @@ SYSTEM_PROMPT_RU = """Ты — София, личный ассистент и н
 ЧТО УМЕЕШЬ: планирование, напоминания, поддержка, нутрициология, цели, рецепты, погода, любые вопросы.
 
 ПЛАНЕР:
-Если слышишь слова "всегда", "каждый", "каждую", "регулярно", "постоянно" + день недели + время — в конце ответа напиши: "Хотите добавить это в ваш планер? Напишите да и я запишу!"
+Если слышишь слова "всегда", "каждый", "каждую", "регулярно", "постоянно" + день недели + время — в конце ответа напиши: "Хотите добавить это в ваш планер? Напомню: в планере хранятся только фиксированные занятия которые повторяются каждую неделю. Напишите да и я запишу!"
 
 РЕЦЕПТЫ:
 Когда пишешь рецепт — в конце ВСЕГДА добавляй вопрос: "Хотите сохранить этот рецепт в ваши любимые?"
@@ -815,10 +815,37 @@ async def send_evening_news(context: ContextTypes.DEFAULT_TYPE):
     lang = user.get("language", "ru")
     dt = get_current_datetime(user.get("timezone", "Europe/Moscow"))
     try:
-        news = await get_news(lang=lang)
-        news_block = f"\n\nСвежие новости:\n{news}" if news else ""
-        prompt = f"Составь короткую вечернюю сводку для {name}. Сегодня {dt['ru']}.{news_block}\n\nВключи: тёплое приветствие, пару полезных советов на вечер, мотивирующее завершение. По-человечески, 3-4 абзаца, без форматирования." if lang == "ru" else f"Create a short evening summary for {name}. Today is {dt['en']}.{news_block}\n\nInclude: warm greeting, evening tips, motivating end. Natural, 3-4 paragraphs."
-        response = ai_client.chat.completions.create(model="gpt-4o-mini", messages=[{"role": "user", "content": prompt}], max_tokens=500, temperature=0.8)
+        async with db_pool.acquire() as conn:
+            habits = await conn.fetch("SELECT id, name FROM habits WHERE user_id = $1", user_id)
+            habit_lines = []
+            for h in habits:
+                count = await conn.fetchval(
+                    "SELECT COUNT(*) FROM habit_logs WHERE habit_id = $1 AND logged_at >= NOW() - INTERVAL '1 day'",
+                    h["id"]
+                )
+                status = "выполнена" if count > 0 else "не отмечена"
+                habit_lines.append(h["name"] + ": " + status)
+            income = await conn.fetchval(
+                "SELECT SUM(amount) FROM finances WHERE user_id = $1 AND type = 'income' AND created_at >= NOW() - INTERVAL '1 day'",
+                user_id
+            ) or 0
+            expense = await conn.fetchval(
+                "SELECT SUM(amount) FROM finances WHERE user_id = $1 AND type = 'expense' AND created_at >= NOW() - INTERVAL '1 day'",
+                user_id
+            ) or 0
+        habits_text = ", ".join(habit_lines) if habit_lines else "привычки не добавлены"
+        date_str = dt["ru"] if lang == "ru" else dt["en"]
+        if lang == "ru":
+            data_block = "Привычки за сегодня: " + habits_text + "\nФинансы: доходы " + str(int(income)) + ", расходы " + str(int(expense))
+            prompt = "Составь тёплый вечерний итог дня для " + name + ". Сегодня " + date_str + ".\n\n" + data_block + "\n\nНапиши как личное колесо баланса — отметь что хорошо получилось сегодня, что можно улучшить завтра, добавь мотивацию и тёплые слова. По-человечески, 3-4 абзаца, без звёздочек и форматирования."
+        else:
+            data_block = "Habits today: " + habits_text + "\nFinances: income " + str(int(income)) + ", expenses " + str(int(expense))
+            prompt = "Create a warm evening day summary for " + name + ". Today is " + date_str + ".\n\n" + data_block + "\n\nWrite like a personal balance wheel — note what went well today, what to improve tomorrow, add motivation and warm words. Natural, 3-4 paragraphs, no asterisks."
+        response = ai_client.chat.completions.create(
+            model="gpt-4o-mini",
+            messages=[{"role": "user", "content": prompt}],
+            max_tokens=600, temperature=0.8
+        )
         await context.bot.send_message(chat_id=user_id, text=response.choices[0].message.content)
     except Exception as e:
         logging.error(f"Ошибка вечерней сводки: {e}")
@@ -1099,7 +1126,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             lines = [DAYS_RU_NAMES[e["day_of_week"]] + " " + e["time_str"] + " — " + e["title"] for e in events]
             text = "Ваш планер:\n\n" + "\n".join(lines)
         else:
-            text = "Планер пуст.\n\nРасскажите о своих регулярных занятиях!\nНапример: каждую среду в 17:00 тренировка"
+            text = "Планер пуст.\n\nЗдесь хранятся только фиксированные регулярные занятия которые повторяются каждую неделю.\n\nНапример: каждую среду в 17:00 тренировка"
         keyboard = [
             [InlineKeyboardButton("➕ Добавить", callback_data="planner_add")],
             [InlineKeyboardButton("🗑 Очистить", callback_data="planner_clear")],
@@ -1239,10 +1266,30 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         if content:
             async with db_pool.acquire() as conn:
                 await conn.execute("INSERT INTO saved_recipes (user_id, title, content) VALUES ($1, $2, $3)", user_id, title, content)
-        await query.edit_message_text("Рецепт сохранён в ваши любимые! ❤️")
+        text = (title + "\n\n" + content if content else "Рецепт сохранён!")
+        if len(text) > 4000: text = text[:4000] + "..."
+        done_kb = InlineKeyboardMarkup([[InlineKeyboardButton("✅ Сохранено ❤️", callback_data="recipe_done")]])
+        try:
+            await query.edit_message_text(text, reply_markup=done_kb)
+        except:
+            await query.edit_message_text("Рецепт сохранён в ваши любимые! ❤️", reply_markup=done_kb)
 
     elif query.data == "dont_save_recipe":
-        await query.edit_message_text("Хорошо, не сохраняю.")
+        content = context.user_data.get("last_recipe_content", "")
+        title = context.user_data.get("last_recipe_title", "")
+        text = (title + "\n\n" + content if content else "Хорошо!")
+        if len(text) > 4000: text = text[:4000] + "..."
+        done_kb = InlineKeyboardMarkup([[InlineKeyboardButton("✅ Готово", callback_data="recipe_done")]])
+        try:
+            await query.edit_message_text(text, reply_markup=done_kb)
+        except:
+            await query.edit_message_text("Хорошо, не сохраняю.", reply_markup=done_kb)
+
+    elif query.data == "recipe_done":
+        try:
+            await query.edit_message_reply_markup(reply_markup=None)
+        except:
+            pass
     elif query.data == "diary_movie":
         await query.edit_message_text("Подбираю фильм..." if ru else "Finding a movie...")
         movie = await get_ai_movie(lang)
