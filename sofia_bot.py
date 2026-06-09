@@ -178,7 +178,7 @@ SYSTEM_PROMPT_RU = """Ты — София, личный ассистент и н
 ЧТО УМЕЕШЬ: планирование, напоминания, поддержка, нутрициология, цели, рецепты, погода, любые вопросы.
 
 ПЛАНЕР:
-Если слышишь слова "всегда", "каждый", "каждую", "регулярно", "постоянно" + день недели + время — в конце ответа напиши: "Хотите добавить это в ваш планер? Напомню: в планере хранятся только фиксированные занятия которые повторяются каждую неделю. Напишите да и я запишу!"
+Если слышишь слова "всегда", "каждый", "каждую", "регулярно", "постоянно" + день недели + время — в конце ответа напиши: "Хотите добавить это в ваш планер? В планере хранятся фиксированные регулярные занятия — те что повторяются каждую неделю. Напишите да (и укажите время если ещё не указали) и я запишу!"
 
 РЕЦЕПТЫ:
 Когда пишешь рецепт — в конце ВСЕГДА добавляй вопрос: "Хотите сохранить этот рецепт в ваши любимые?"
@@ -1664,6 +1664,84 @@ async def process_text_message(update: Update, context: ContextTypes.DEFAULT_TYP
             await update.message.reply_text(reply)
             await notify_admin(context, user_name, username, user_text, reply)
             return
+
+    # Пользователь ответил "да" на предложение добавить в планер
+    if user_text.strip().lower() in ["да", "yes", "добавь", "запиши"] and context.user_data.get("pending_planner_text"):
+        original_text = context.user_data.pop("pending_planner_text")
+        h, m = extract_exact_time(original_text)
+        if h is None:
+            # Времени нет — спрашиваем
+            context.user_data["waiting_planner_time"] = original_text
+            await update.message.reply_text("В какое время? Напишите например 19:00")
+            return
+        # Время есть — ищем день
+        text_lower = original_text.lower()
+        day_num = None
+        for day_name, day_idx in DAYS_RU.items():
+            if day_name in text_lower:
+                day_num = day_idx
+                break
+        if day_num is None:
+            context.user_data["waiting_planner_day"] = original_text
+            await update.message.reply_text("В какой день недели? Напишите например: пятница")
+            return
+        time_str = str(h).zfill(2) + ":" + str(m).zfill(2)
+        parts = original_text.split(time_str)
+        event_title = parts[-1].strip().lstrip("-— ") if len(parts) > 1 else original_text
+        async with db_pool.acquire() as conn:
+            await conn.execute("INSERT INTO planner (user_id, day_of_week, time_str, title) VALUES ($1, $2, $3, $4)", user_id, day_num, time_str, event_title)
+        day_display = DAYS_RU_NAMES[day_num]
+        await update.message.reply_text("Записала! Каждый " + day_display + " в " + time_str + " — " + event_title + " 📅")
+        return
+
+    # Пользователь уточнил время для планера
+    if context.user_data.get("waiting_planner_time"):
+        original_text = context.user_data.pop("waiting_planner_time")
+        h, m = extract_exact_time(user_text)
+        if h is None:
+            await update.message.reply_text("Не поняла время. Напишите например 19:00")
+            return
+        time_str = str(h).zfill(2) + ":" + str(m).zfill(2)
+        text_lower = original_text.lower()
+        day_num = None
+        for day_name, day_idx in DAYS_RU.items():
+            if day_name in text_lower:
+                day_num = day_idx
+                break
+        if day_num is None:
+            context.user_data["waiting_planner_day_and_time"] = original_text + " в " + time_str
+            await update.message.reply_text("В какой день недели? Напишите например: пятница")
+            return
+        import re as _re_pl
+        event_title = _re_pl.sub(r"(каждый|каждую|каждое|всегда|регулярно)\s+\S+", "", original_text, flags=_re_pl.IGNORECASE).strip()
+        if not event_title:
+            event_title = original_text
+        async with db_pool.acquire() as conn:
+            await conn.execute("INSERT INTO planner (user_id, day_of_week, time_str, title) VALUES ($1, $2, $3, $4)", user_id, day_num, time_str, event_title)
+        day_display = DAYS_RU_NAMES[day_num]
+        await update.message.reply_text("Записала! Каждый " + day_display + " в " + time_str + " — " + event_title + " 📅")
+        return
+
+    # Пользователь уточнил день для планера (когда было время но не было дня)
+    if context.user_data.get("waiting_planner_day"):
+        original_text = context.user_data.pop("waiting_planner_day")
+        day_num = None
+        for day_name, day_idx in DAYS_RU.items():
+            if day_name in user_text.lower():
+                day_num = day_idx
+                break
+        if day_num is None:
+            await update.message.reply_text("Не поняла день. Напишите например: пятница")
+            return
+        h, m = extract_exact_time(original_text)
+        time_str = str(h).zfill(2) + ":" + str(m).zfill(2)
+        parts = original_text.split(time_str)
+        event_title = parts[-1].strip().lstrip("-— ") if len(parts) > 1 else original_text
+        async with db_pool.acquire() as conn:
+            await conn.execute("INSERT INTO planner (user_id, day_of_week, time_str, title) VALUES ($1, $2, $3, $4)", user_id, day_num, time_str, event_title)
+        day_display = DAYS_RU_NAMES[day_num]
+        await update.message.reply_text("Записала! Каждый " + day_display + " в " + time_str + " — " + event_title + " 📅")
+        return
 
     if context.user_data.get("waiting_recipe_choice"):
         cat_key = context.user_data["waiting_recipe_choice"]
