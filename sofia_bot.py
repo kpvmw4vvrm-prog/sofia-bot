@@ -1008,12 +1008,12 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     elif query.data == "menu_diary":
         keyboard = [
-            [InlineKeyboardButton("Финансы", callback_data="diary_finances"), InlineKeyboardButton("Сон", callback_data="diary_sleep")],
-            [InlineKeyboardButton("Вода", callback_data="diary_water"), InlineKeyboardButton("Привычки", callback_data="diary_habits")],
-            [InlineKeyboardButton("Заметки", callback_data="diary_notes"), InlineKeyboardButton("Рецепты", callback_data="diary_recipe")],
-            [InlineKeyboardButton("Что посмотреть", callback_data="diary_movie"), InlineKeyboardButton("Покупки", callback_data="diary_shopping")],
-            [InlineKeyboardButton("Планер", callback_data="diary_planner")],
-            [InlineKeyboardButton("Назад", callback_data="back_main")],
+            [InlineKeyboardButton("💰 Финансы", callback_data="diary_finances"), InlineKeyboardButton("😴 Сон", callback_data="diary_sleep")],
+            [InlineKeyboardButton("💧 Вода", callback_data="diary_water"), InlineKeyboardButton("💪 Привычки", callback_data="diary_habits")],
+            [InlineKeyboardButton("📝 Заметки", callback_data="diary_notes"), InlineKeyboardButton("🍳 Рецепты", callback_data="diary_recipe")],
+            [InlineKeyboardButton("🎬 Что посмотреть", callback_data="diary_movie"), InlineKeyboardButton("🛒 Покупки", callback_data="diary_shopping")],
+            [InlineKeyboardButton("📅 Планер", callback_data="diary_planner")],
+            [InlineKeyboardButton("◀️ Назад", callback_data="back_main")],
         ]
         await query.edit_message_text("Дневник:" if ru else "Diary:", reply_markup=InlineKeyboardMarkup(keyboard))
 
@@ -1023,7 +1023,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         status = "Включены" if water_on else "Выключены"
         toggle_text = "Выключить" if water_on else "Включить"
         keyboard = [
-            [InlineKeyboardButton("Выпила воду!", callback_data="water_drink")],
+            [InlineKeyboardButton("💧 Выпила воду!", callback_data="water_drink")],
             [InlineKeyboardButton(toggle_text, callback_data="water_toggle")],
             [InlineKeyboardButton("Назад", callback_data="menu_diary")],
         ]
@@ -1035,9 +1035,9 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             habits = await conn.fetch("SELECT id, name FROM habits WHERE user_id = $1", user_id)
         text = "Ваши привычки:\n\n" + "\n".join(["+ " + h["name"] for h in habits]) if habits else "Привычек пока нет."
         keyboard = [
-            [InlineKeyboardButton("Добавить", callback_data="habit_add")],
-            [InlineKeyboardButton("Отметить", callback_data="habit_log")],
-            [InlineKeyboardButton("Статистика", callback_data="habit_stats")],
+            [InlineKeyboardButton("➕ Добавить", callback_data="habit_add")],
+            [InlineKeyboardButton("✅ Отметить", callback_data="habit_log")],
+            [InlineKeyboardButton("📊 Статистика", callback_data="habit_stats")],
             [InlineKeyboardButton("Назад", callback_data="menu_diary")],
         ]
         await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard))
@@ -1595,23 +1595,15 @@ async def process_text_message(update: Update, context: ContextTypes.DEFAULT_TYP
 
         # Погода в чате
         if is_weather_request(user_text) and not is_reminder_request(user_text):
-            await context.bot.send_chat_action(chat_id=update.effective_chat.id, action="typing")
-            # Определяем хочет ли завтрашнюю погоду
-            if "завтра" in user_text.lower() or "tomorrow" in user_text.lower():
-                forecast = await get_weather_forecast(city, lang)
-                if forecast:
-                    lines = forecast.split("\n\n")[1].split("\n") if "\n\n" in forecast else []
-                    tomorrow = lines[1] if len(lines) > 1 else ""
-                    if tomorrow:
-                        reply = f"Завтра в {city_in_form(city) if lang == 'ru' else city}: {tomorrow}" if lang == "ru" else f"Tomorrow in {city}: {tomorrow}"
-                        await update.message.reply_text(reply)
-                        await notify_admin(context, user_name, username, user_text, reply)
-                        return
-            weather = await get_weather(city, lang)
-            await update.message.reply_text(weather)
-            await notify_admin(context, user_name, username, user_text, weather)
-            return
-
+            try:
+                await context.bot.send_chat_action(chat_id=update.effective_chat.id, action="typing")
+                user_city = user.get("city") or "Москва"
+                weather = await get_weather(user_city, lang)
+                await update.message.reply_text(weather)
+                await notify_admin(context, user_name, username, user_text, weather)
+                return
+            except Exception as we:
+                logging.error("Погода ошибка: " + str(we))
         # Напоминания
         if is_reminder_request(user_text):
             tz = pytz.timezone(user["timezone"] or "Europe/Moscow")
