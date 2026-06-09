@@ -1282,7 +1282,8 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             [InlineKeyboardButton("4", callback_data="stress_4"), InlineKeyboardButton("5", callback_data="stress_5"), InlineKeyboardButton("6", callback_data="stress_6")],
             [InlineKeyboardButton("7", callback_data="stress_7"), InlineKeyboardButton("8", callback_data="stress_8"), InlineKeyboardButton("9", callback_data="stress_9")],
             [InlineKeyboardButton("10", callback_data="stress_10")],
-            [InlineKeyboardButton("◀️ Назад", callback_data="diary_health")],
+            [InlineKeyboardButton("📊 История за неделю", callback_data="stress_history")],
+            [InlineKeyboardButton("◀️ Назад", callback_data="menu_health")],
         ]
         await query.edit_message_text("Оцените уровень стресса:\n\n1 — всё спокойно\n10 — очень высокий стресс", reply_markup=InlineKeyboardMarkup(keyboard))
 
@@ -1325,18 +1326,47 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
     elif query.data == "health_nutrition":
         async with db_pool.acquire() as conn:
             profile = await conn.fetchrow("SELECT * FROM nutrition_profile WHERE user_id = $1 ORDER BY created_at DESC LIMIT 1", user_id)
+            today_cal = await conn.fetchval("SELECT SUM(calories) FROM food_logs WHERE user_id = $1 AND created_at >= CURRENT_DATE", user_id) or 0
         if profile:
-            text = "Нутрициология:\n\nРост: " + str(int(profile["height"])) + " см\nВес: " + str(int(profile["weight"])) + " кг\nЦель: " + str(profile["goal"]) + "\nКалорий в день: " + str(profile["calories_goal"]) + " ккал\n\nПишите мне что ели — я посчитаю калории!"
+            age_txt = ("\nВозраст: " + str(profile["age"]) + " лет") if profile.get("age") else ""
+            preg_txt = " (беременность)" if profile.get("pregnant") else ""
+            meds_txt = ("\nПрепараты: " + str(profile["medications"])) if profile.get("medications") else ""
+            norm = profile["calories_goal"] or 0
+            remaining = norm - today_cal
+            text = ("Нутрициология 🥗\n\nРост: " + str(int(profile["height"])) + " см\nВес: " + str(int(profile["weight"])) + " кг" + age_txt + "\nЦель: " + str(profile["goal"]) + preg_txt + meds_txt + "\nНорма калорий: " + str(norm) + " ккал\nСегодня съели: " + str(today_cal) + " ккал\nОсталось: " + str(max(0, remaining)) + " ккал\n\nЧто умею:\n• Отправьте фото еды — посчитаю КБЖУ и запишу\n• Напишите что ели — тоже посчитаю\n• Смотрите журнал питания за день")
             keyboard = [
+                [InlineKeyboardButton("📋 Журнал питания", callback_data="food_log_view")],
                 [InlineKeyboardButton("✏️ Обновить профиль", callback_data="nutrition_setup")],
                 [InlineKeyboardButton("◀️ Назад", callback_data="menu_health")],
             ]
         else:
             context.user_data["nutrition_setup"] = True
-            context.user_data["nutrition_step"] = "height"
+            context.user_data["nutrition_step"] = "intro"
             keyboard = [[InlineKeyboardButton("◀️ Назад", callback_data="menu_health")]]
-            text = "Нутрициология\n\nДавайте настроим ваш профиль питания!\n\nНапишите ваш рост в см:"
+            text = ("Нутрициология 🥗\n\nЭтот раздел — ваш личный нутрициолог!\n\nЧто я умею:\n• Анализировать фото еды и считать КБЖУ\n• Записывать питание в журнал\n• Считать сколько калорий осталось до нормы\n• Давать персональные рекомендации\n\nДля начала нужно заполнить ваш профиль.\n\nВаш рост в см:")
         await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard))
+
+    elif query.data == "food_log_view":
+        async with db_pool.acquire() as conn:
+            profile = await conn.fetchrow("SELECT calories_goal FROM nutrition_profile WHERE user_id = $1 ORDER BY created_at DESC LIMIT 1", user_id)
+            logs = await conn.fetch("SELECT description, calories, protein, fat, carbs, created_at FROM food_logs WHERE user_id = $1 AND created_at >= CURRENT_DATE ORDER BY created_at", user_id)
+        if logs:
+            total_cal = sum(l["calories"] or 0 for l in logs)
+            total_prot = sum(l["protein"] or 0 for l in logs)
+            total_fat = sum(l["fat"] or 0 for l in logs)
+            total_carb = sum(l["carbs"] or 0 for l in logs)
+            lines = []
+            for l in logs:
+                t_str = l["created_at"].strftime("%H:%M")
+                lines.append(t_str + " " + l["description"][:25] + " — " + str(l["calories"]) + " ккал")
+            norm = profile["calories_goal"] if profile else 0
+            text = "Журнал питания сегодня:\n\n" + "\n".join(lines)
+            text += "\n\nИтого: " + str(total_cal) + " ккал | Б: " + str(round(total_prot, 1)) + " г | Ж: " + str(round(total_fat, 1)) + " г | У: " + str(round(total_carb, 1)) + " г"
+            if norm: text += "\nНорма: " + str(norm) + " ккал | Осталось: " + str(max(0, norm - total_cal)) + " ккал"
+        else:
+            text = "Сегодня записей питания нет.\n\nОтправьте фото еды или напишите что ели!"
+        back = InlineKeyboardButton("◀️ Назад", callback_data="health_nutrition")
+        await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup([[back]]))
 
     elif query.data == "nutrition_setup":
         context.user_data["nutrition_setup"] = True
@@ -1359,6 +1389,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         keyboard = [[InlineKeyboardButton("➕ Добавить цель", callback_data="goal_add")]]
         if goals:
             keyboard.append([InlineKeyboardButton("📊 Обновить прогресс", callback_data="goal_progress")])
+            keyboard.append([InlineKeyboardButton("🗑 Удалить цель", callback_data="goal_delete")])
         keyboard.append([InlineKeyboardButton("◀️ Назад", callback_data="back_main")])
         await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard))
 
@@ -1366,6 +1397,46 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         context.user_data["waiting_goal"] = True
         back = InlineKeyboardButton("◀️ Назад", callback_data="menu_goals")
         await query.edit_message_text("Напишите цель и дедлайн через запятую:\n\nНапример: Выучить английский, 31.12.2025\nИли просто: Начать бегать", reply_markup=InlineKeyboardMarkup([[back]]))
+
+    elif query.data == "goal_delete":
+        async with db_pool.acquire() as conn:
+            goals_d = await conn.fetch("SELECT id, title FROM goals WHERE user_id = $1", user_id)
+        if not goals_d:
+            back = InlineKeyboardButton("◀️ Назад", callback_data="menu_goals")
+            await query.edit_message_text("Целей нет.", reply_markup=InlineKeyboardMarkup([[back]]))
+            return
+        keyboard = [[InlineKeyboardButton("🗑 " + g["title"][:30], callback_data="del_goal_" + str(g["id"]))] for g in goals_d]
+        keyboard.append([InlineKeyboardButton("◀️ Назад", callback_data="menu_goals")])
+        await query.edit_message_text("Какую цель удалить?", reply_markup=InlineKeyboardMarkup(keyboard))
+
+    elif query.data.startswith("del_goal_"):
+        gid_del = int(query.data.split("_")[-1])
+        async with db_pool.acquire() as conn:
+            g_row = await conn.fetchrow("SELECT title FROM goals WHERE id = $1", gid_del)
+            await conn.execute("DELETE FROM goals WHERE id = $1", gid_del)
+        back = InlineKeyboardButton("◀️ Назад", callback_data="menu_goals")
+        await query.edit_message_text("Цель удалена: " + (g_row["title"] if g_row else "") + " 🗑", reply_markup=InlineKeyboardMarkup([[back]]))
+
+    elif query.data == "stress_history":
+        async with db_pool.acquire() as conn:
+            logs = await conn.fetch("SELECT level, created_at FROM stress_logs WHERE user_id = $1 AND created_at >= NOW() - INTERVAL '7 days' ORDER BY created_at", user_id)
+        if logs:
+            from collections import defaultdict
+            days_data = defaultdict(list)
+            for l in logs:
+                day = l["created_at"].strftime("%d.%m")
+                days_data[day].append(l["level"])
+            lines = []
+            days_ru_short = ["Пн","Вт","Ср","Чт","Пт","Сб","Вс"]
+            for day, levels in days_data.items():
+                avg = round(sum(levels) / len(levels), 1)
+                bar = "█" * int(avg) + "░" * (10 - int(avg))
+                lines.append(day + " " + bar + " " + str(avg))
+            text = "Стресс за 7 дней (1-10):\n\n" + "\n".join(lines)
+        else:
+            text = "Данных о стрессе за неделю нет."
+        back = InlineKeyboardButton("◀️ Назад", callback_data="health_stress")
+        await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup([[back]]))
 
     elif query.data == "goal_progress":
         async with db_pool.acquire() as conn:
@@ -1687,6 +1758,35 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             text = "Вечерняя сводка выключена." if ru else "Evening summary off."
         back = InlineKeyboardButton("◀️ Назад" if ru else "◀️ Back", callback_data="menu_settings")
         await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup([[back]]))
+
+    elif query.data == "count_food_calories":
+        image_data = context.user_data.pop("pending_food_photo", None)
+        if not image_data:
+            await query.edit_message_text("Фото не найдено. Отправьте снова.")
+            return
+        await query.edit_message_text("Анализирую... 🔍")
+        food_res = await analyze_food_photo(image_data)
+        if food_res and "Калории:" in food_res:
+            import re as _rfc
+            cal_m = _rfc.search(r"Калории:\s*(\d+)", food_res)
+            prot_m = _rfc.search(r"Белки:\s*([\d.]+)", food_res)
+            fat_m = _rfc.search(r"Жиры:\s*([\d.]+)", food_res)
+            carb_m = _rfc.search(r"Углеводы:\s*([\d.]+)", food_res)
+            dish_m = _rfc.search(r"Блюдо:\s*(.+)", food_res)
+            async with db_pool.acquire() as conn:
+                await conn.execute("INSERT INTO food_logs (user_id, description, calories, protein, fat, carbs) VALUES ($1, $2, $3, $4, $5, $6)", user_id, dish_m.group(1).strip() if dish_m else "Блюдо", int(cal_m.group(1)) if cal_m else 0, float(prot_m.group(1)) if prot_m else 0, float(fat_m.group(1)) if fat_m else 0, float(carb_m.group(1)) if carb_m else 0)
+            await query.edit_message_text(food_res + "\n\nЗаписала в журнал питания! 🥗")
+        else:
+            await query.edit_message_text("Не смогла определить КБЖУ. Попробуйте другое фото.")
+
+    elif query.data == "just_describe_photo":
+        image_data = context.user_data.pop("pending_food_photo", None)
+        if not image_data:
+            await query.edit_message_text("Фото не найдено.")
+            return
+        await query.edit_message_text("Описываю фото...")
+        reply = await analyze_image(image_data, "", lang)
+        await query.edit_message_text(reply)
 
     elif query.data == "close_menu":
         await query.edit_message_text("Меню закрыто. Напишите /menu чтобы открыть снова 🌸" if ru else "Menu closed. Type /menu to open again 🌸")
@@ -2092,6 +2192,10 @@ async def process_text_message(update: Update, context: ContextTypes.DEFAULT_TYP
             height_v = float(pw[1].replace(",", ".")) if len(pw) > 1 else None
             async with db_pool.acquire() as conn:
                 await conn.execute("INSERT INTO weight_logs (user_id, weight, height) VALUES ($1, $2, $3)", user_id, weight_v, height_v)
+                # Синхронизируем с профилем нутрициологии
+                nutr = await conn.fetchrow("SELECT id FROM nutrition_profile WHERE user_id = $1 ORDER BY created_at DESC LIMIT 1", user_id)
+                if nutr:
+                    await conn.execute("UPDATE nutrition_profile SET weight = $1 WHERE user_id = $2", weight_v, user_id)
             rw = "Вес записан: " + str(weight_v) + " кг"
             if height_v:
                 bmi = round(weight_v / ((height_v / 100) ** 2), 1)
@@ -2170,16 +2274,6 @@ async def process_text_message(update: Update, context: ContextTypes.DEFAULT_TYP
             except Exception as ne:
                 logging.error("Ошибка нутрициологии: " + str(ne))
                 await update.message.reply_text("Что-то пошло не так. Попробуйте ещё раз — напишите /menu и откройте Здоровье → Нутрициология")
-            context.user_data["nutrition_setup"] = False
-            context.user_data["nutrition_step"] = None
-            recs = ""
-            if age_n and age_n < 25: recs += "\nВ вашем возрасте важны кальций и витамин D."
-            if context.user_data.get("nutrition_pregnant"): recs += "\nПри беременности добавьте фолиевую кислоту и омега-3."
-            if meds_val: recs += "\nНекоторые препараты влияют на усвоение витаминов — посоветуйтесь с врачом."
-            reply_txt = "Профиль создан!\n\nРост: " + str(int(h_n)) + " см\nВес: " + str(int(w_n)) + " кг\nКалорий/день: " + str(cal) + " ккал"
-            if recs: reply_txt += "\n\nРекомендации:" + recs
-            reply_txt += "\n\nОтправляйте фото еды или пишите что ели — я посчитаю КБЖУ!"
-            await update.message.reply_text(reply_txt, reply_markup=ReplyKeyboardRemove())
             return
 
     if context.user_data.get("waiting_goal"):
@@ -2446,11 +2540,43 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
             image_data = base64.b64encode(f.read()).decode("utf-8")
         os.unlink(tmp_path)
         caption = update.message.caption or ""
-        reply = await analyze_image(image_data, caption, lang)
-        await update.message.reply_text(reply)
         user_name = update.effective_user.first_name or "Пользователь"
         username = update.effective_user.username or "нет username"
-        await notify_admin(context, user_name, username, f"[Фото]{' ' + caption if caption else ''}", reply)
+        async with db_pool.acquire() as conn:
+            has_nutr = await conn.fetchrow("SELECT id FROM nutrition_profile WHERE user_id = $1", user_id)
+        if has_nutr and not caption:
+            context.user_data["pending_food_photo"] = image_data
+            kb = InlineKeyboardMarkup([[
+                InlineKeyboardButton("🍽 Да, посчитай калории", callback_data="count_food_calories"),
+                InlineKeyboardButton("🖼 Нет, просто опиши", callback_data="just_describe_photo"),
+            ]])
+            await update.message.reply_text("Это фото еды? Посчитать калории и записать в журнал?", reply_markup=kb)
+            return
+        if has_nutr and caption:
+            food_res = await analyze_food_photo(image_data)
+            if food_res and "Калории:" in food_res:
+                import re as _rff
+                cal_m = _rff.search(r"Калории:\s*(\d+)", food_res)
+                prot_m = _rff.search(r"Белки:\s*([\d.]+)", food_res)
+                fat_m = _rff.search(r"Жиры:\s*([\d.]+)", food_res)
+                carb_m = _rff.search(r"Углеводы:\s*([\d.]+)", food_res)
+                dish_m = _rff.search(r"Блюдо:\s*(.+)", food_res)
+                async with db_pool.acquire() as conn:
+                    await conn.execute(
+                        "INSERT INTO food_logs (user_id, description, calories, protein, fat, carbs) VALUES ($1, $2, $3, $4, $5, $6)",
+                        user_id,
+                        dish_m.group(1).strip() if dish_m else caption,
+                        int(cal_m.group(1)) if cal_m else 0,
+                        float(prot_m.group(1)) if prot_m else 0,
+                        float(fat_m.group(1)) if fat_m else 0,
+                        float(carb_m.group(1)) if carb_m else 0
+                    )
+                await update.message.reply_text(food_res + "\n\nЗаписала в журнал! 🥗")
+                await notify_admin(context, user_name, username, "[Фото еды] " + caption, food_res[:200])
+                return
+        reply = await analyze_image(image_data, caption, lang)
+        await update.message.reply_text(reply)
+        await notify_admin(context, user_name, username, "[Фото]" + (" " + caption if caption else ""), reply)
     except Exception as e:
         logging.error(f"Ошибка фото: {e}")
         await update.message.reply_text("Не удалось проанализировать фото." if ru else "Could not analyze the photo.")
