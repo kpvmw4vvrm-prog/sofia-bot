@@ -223,29 +223,47 @@ Plan format (only when asked):
 09:00 — task
 10:00 — task"""
 
-SKILLS_RU = """Вот что я умею 🌸
+SKILLS_RU = """Привет! Я София — ваш личный ИИ-ассистент 🌸
 
-Обучаюсь под вас — запоминаю предпочтения, привычки и цели.
+Вот всё что я умею:
 
-Планирование — план на день, неделю или месяц.
+Общение и память
+Запоминаю всё что вы рассказываете — предпочтения, привычки, важные даты. Отправляйте голосовые сообщения — не нужно ничего писать, я пойму и отвечу. Присылайте фото — опишу что на них или отвечу на вопрос по картинке. Отвечаю на любые вопросы и поддерживаю в трудный момент.
 
-Голосовые сообщения — говорите вслух, пойму и отвечу.
+Планирование
+Составляю план на день, неделю или месяц. Устанавливаю напоминания в любое время. Веду планер регулярных занятий — тренировки, курсы, встречи.
 
-Анализ фото — пришлите фото, опишу или отвечу на вопрос.
+Утро и вечер
+Утром присылаю план дня, погоду и мотивацию. Вечером — личный итог дня: привычки, финансы, прогресс. Как колесо баланса 🌸
 
-Генерация изображений — напишите "нарисуй..." и я создам картинку.
+Здоровье
+• Цикл — история, прогноз, напоминание за 3 и 1 день
+• Таблетки — список, напоминания, журнал приёма
+• Стресс — оценка 1-10, история за неделю
+• Вес и рост — трекер динамики, ИМТ
+• Нутрициология — профиль питания, подсчёт КБЖУ по фото и тексту, журнал за день
+• Настроение — трекер с историей за месяц
 
-Новости — свежие новости по вашему запросу.
+Цели
+Добавляю цели с дедлайном и прогресс-баром. Сама оцениваю прогресс по тому что вы рассказали. Периодически напоминаю о целях.
 
-Два языка — русский и английский 🇷🇺 🇬🇧
+Дневник
+• Финансы — доходы и расходы, баланс за месяц
+• Сон — калькулятор идеального времени засыпания
+• Вода — счётчик стаканов с прогресс-баром, напоминания
+• Привычки — трекер с еженедельным отчётом по воскресеньям
+• Заметки — сохраняю всё важное
+• Рецепты — по категориям, сохранение любимых
+• Что посмотреть — подборка фильмов и сериалов
+• Покупки — список покупок
+• Планер — регулярные занятия по дням недели
+• Дни рождения — напоминания за 7, 3, 1 день и в сам день
 
-Умные напоминания, утренний план, погода по часам и на неделю.
+Интересное
+Свежие статьи по темам: наука, технологии и ИИ, здоровье и долголетие, вдохновляющие истории.
 
-Трекер привычек, сна, воды, финансов.
-
-Список покупок, заметки, рецепты, фильмы.
-
-Психологическая поддержка и советы нутрициолога.
+Дополнительно
+Генерирую изображения по описанию — напишите "нарисуй...". Погода сейчас, по часам и на неделю. Два языка — русский и английский 🇷🇺 🇬🇧
 
 Напишите /menu чтобы открыть меню 🌸"""
 
@@ -1637,7 +1655,6 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 [InlineKeyboardButton("🌍 Изменить город", callback_data="profile_city")],
                 [InlineKeyboardButton("💬 Сменить стиль общения", callback_data="change_comm_style")],
                 [InlineKeyboardButton("🌐 Switch to English 🇬🇧", callback_data="switch_lang_en")],
-                [InlineKeyboardButton("🗑 Забудь всё обо мне", callback_data="confirm_forget")],
                 [InlineKeyboardButton("◀️ Назад", callback_data="back_main")],
             ]
         else:
@@ -1646,7 +1663,6 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 [InlineKeyboardButton("🌍 Change city", callback_data="profile_city")],
                 [InlineKeyboardButton("💬 Change communication style", callback_data="change_comm_style")],
                 [InlineKeyboardButton("🌐 Switch to Russian 🇷🇺", callback_data="switch_lang_ru")],
-                [InlineKeyboardButton("🗑 Forget everything about me", callback_data="confirm_forget")],
                 [InlineKeyboardButton("◀️ Back", callback_data="back_main")],
             ]
         await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard))
@@ -1728,7 +1744,6 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 [InlineKeyboardButton(mm + " Мотивация утром", callback_data="toggle_morning_motivation")],
                 [InlineKeyboardButton(w + " Напоминания о воде", callback_data="water_toggle")],
                 [InlineKeyboardButton(ev + " Вечерняя сводка", callback_data="toggle_evening_news")],
-                [InlineKeyboardButton("🗑 Забудь всё обо мне", callback_data="confirm_forget")],
                 [InlineKeyboardButton("◀️ Назад", callback_data="back_main")],
             ]
         else:
@@ -1741,7 +1756,6 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
                 [InlineKeyboardButton(mm + " Motivation in morning", callback_data="toggle_morning_motivation")],
                 [InlineKeyboardButton(w + " Water reminders", callback_data="water_toggle")],
                 [InlineKeyboardButton(ev + " Evening summary", callback_data="toggle_evening_news")],
-                [InlineKeyboardButton("🗑 Forget everything", callback_data="confirm_forget")],
                 [InlineKeyboardButton("◀️ Back", callback_data="back_main")],
             ]
         await query.edit_message_text("Настройки" if ru else "Settings", reply_markup=InlineKeyboardMarkup(keyboard))
@@ -2817,6 +2831,29 @@ async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE):
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await process_text_message(update, context, update.message.text)
 
+async def reset_user(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_user.id != ADMIN_ID:
+        await update.message.reply_text("Нет доступа.")
+        return
+    if not context.args:
+        await update.message.reply_text("Использование: /reset USER_ID\nНапример: /reset 7630390995")
+        return
+    try:
+        target_id = int(context.args[0])
+        async with db_pool.acquire() as conn:
+            for tbl in ["history", "reminders", "notes", "habits", "habit_logs", "finances", "user_memory", "sleep_logs", "shopping_list", "saved_recipes", "planner", "cycle_tracking", "medications", "medication_logs", "stress_logs", "goals", "weight_logs", "nutrition_profile", "food_logs", "birthdays", "mood_logs", "water_logs"]:
+                try:
+                    await conn.execute(f"DELETE FROM {tbl} WHERE user_id = $1", target_id)
+                except:
+                    pass
+            await conn.execute("UPDATE users SET onboarded = FALSE, name = NULL, morning_plan = FALSE, evening_news = FALSE, water_reminders = FALSE, comm_style = 'наставник' WHERE user_id = $1", target_id)
+        for job in context.application.job_queue.jobs():
+            if hasattr(job, "data") and (job.data == target_id or (isinstance(job.data, dict) and job.data.get("user_id") == target_id)):
+                job.schedule_removal()
+        await update.message.reply_text(f"Пользователь {target_id} сброшен. При следующем /start пройдёт онбординг заново.")
+    except Exception as e:
+        await update.message.reply_text(f"Ошибка: {e}")
+
 async def stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id != ADMIN_ID:
         await update.message.reply_text("Нет доступа.")
@@ -2998,6 +3035,7 @@ if __name__ == "__main__":
     app.add_handler(CommandHandler("skills", skills_command))
     app.add_handler(CommandHandler("announce", announce))
     app.add_handler(CommandHandler("stats", stats))
+    app.add_handler(CommandHandler("reset", reset_user))
     app.add_handler(CallbackQueryHandler(button_handler))
     app.add_handler(MessageHandler(filters.PHOTO, handle_photo))
     app.add_handler(MessageHandler(filters.VOICE, handle_voice))
