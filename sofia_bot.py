@@ -183,6 +183,13 @@ SYSTEM_PROMPT_RU = """Ты — София, личный ассистент и н
 РЕЦЕПТЫ:
 Когда пишешь рецепт — в конце ВСЕГДА добавляй вопрос: "Хотите сохранить этот рецепт в ваши любимые?"
 
+ЗДОРОВЬЕ И ТАБЛЕТКИ:
+Если спрашивают "пила ли я таблетку сегодня" — отвечай что проверить приём можно в разделе Здоровье → Таблетки где хранится журнал. НЕ говори что не можешь отслеживать.
+Если спрашивают про цикл — объясни что всё хранится в Здоровье → Цикл: история, прогноз, дата следующего.
+
+ЦЕЛИ:
+Если пользователь говорит о своих целях — напомни что можно добавить в раздел Цели для отслеживания прогресса.
+
 Формат плана (только когда просят):
 09:00 — задача
 10:00 — задача"""
@@ -310,6 +317,9 @@ async def init_db():
             """CREATE TABLE IF NOT EXISTS medications (id SERIAL PRIMARY KEY, user_id BIGINT, name TEXT, time_str TEXT, created_at TIMESTAMP DEFAULT NOW())""",
             """CREATE TABLE IF NOT EXISTS medication_logs (id SERIAL PRIMARY KEY, user_id BIGINT, med_id INTEGER, taken_at TIMESTAMP DEFAULT NOW())""",
             """CREATE TABLE IF NOT EXISTS stress_logs (id SERIAL PRIMARY KEY, user_id BIGINT, level INTEGER, note TEXT, created_at TIMESTAMP DEFAULT NOW())""",
+            """CREATE TABLE IF NOT EXISTS goals (id SERIAL PRIMARY KEY, user_id BIGINT, title TEXT, description TEXT, deadline DATE, progress INTEGER DEFAULT 0, created_at TIMESTAMP DEFAULT NOW())""",
+            """CREATE TABLE IF NOT EXISTS weight_logs (id SERIAL PRIMARY KEY, user_id BIGINT, weight FLOAT, height FLOAT, created_at TIMESTAMP DEFAULT NOW())""",
+            """CREATE TABLE IF NOT EXISTS nutrition_profile (id SERIAL PRIMARY KEY, user_id BIGINT, height FLOAT, weight FLOAT, goal TEXT, calories_goal INTEGER, created_at TIMESTAMP DEFAULT NOW())""",
         ]:
             await conn.execute(table)
         for col, definition in [
@@ -874,6 +884,7 @@ def get_main_menu(lang="ru"):
     ru = lang == "ru"
     keyboard = [
         [InlineKeyboardButton("🌅 Утро" if ru else "🌅 Morning", callback_data="menu_morning"), InlineKeyboardButton("📒 Дневник" if ru else "📒 Diary", callback_data="menu_diary")],
+        [InlineKeyboardButton("🏥 Здоровье" if ru else "🏥 Health", callback_data="menu_health"), InlineKeyboardButton("🎯 Цели" if ru else "🎯 Goals", callback_data="menu_goals")],
         [InlineKeyboardButton("✨ Интересное" if ru else "✨ Interesting", callback_data="menu_interesting"), InlineKeyboardButton("⚙️ Настройки" if ru else "⚙️ Settings", callback_data="menu_settings")],
         [InlineKeyboardButton("✖️ Закрыть меню" if ru else "✖️ Close menu", callback_data="close_menu")],
     ]
@@ -1094,7 +1105,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             [InlineKeyboardButton("💧 Вода", callback_data="diary_water"), InlineKeyboardButton("💪 Привычки", callback_data="diary_habits")],
             [InlineKeyboardButton("📝 Заметки", callback_data="diary_notes"), InlineKeyboardButton("🍳 Рецепты", callback_data="diary_recipe")],
             [InlineKeyboardButton("🎬 Что посмотреть", callback_data="diary_movie"), InlineKeyboardButton("🛒 Покупки", callback_data="diary_shopping")],
-            [InlineKeyboardButton("📅 Планер", callback_data="diary_planner"), InlineKeyboardButton("🏥 Здоровье", callback_data="diary_health")],
+            [InlineKeyboardButton("📅 Планер", callback_data="diary_planner")],
             [InlineKeyboardButton("◀️ Назад", callback_data="back_main")],
         ]
         await query.edit_message_text("Дневник:" if ru else "Diary:", reply_markup=InlineKeyboardMarkup(keyboard))
@@ -1164,11 +1175,13 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await conn.execute("DELETE FROM planner WHERE user_id = $1", user_id)
         back = InlineKeyboardButton("◀️ Назад", callback_data="diary_planner")
         await query.edit_message_text("Планер очищен.", reply_markup=InlineKeyboardMarkup([[back]]))
-    elif query.data == "diary_health":
+    elif query.data in ["diary_health", "menu_health"]:
+        back_cb = "back_main" if query.data == "menu_health" else "menu_diary"
         keyboard = [
             [InlineKeyboardButton("🩸 Цикл", callback_data="health_cycle"), InlineKeyboardButton("💊 Таблетки", callback_data="health_meds")],
-            [InlineKeyboardButton("😰 Стресс", callback_data="health_stress")],
-            [InlineKeyboardButton("◀️ Назад", callback_data="menu_diary")],
+            [InlineKeyboardButton("😰 Стресс", callback_data="health_stress"), InlineKeyboardButton("⚖️ Вес и рост", callback_data="health_weight")],
+            [InlineKeyboardButton("🥗 Нутрициология", callback_data="health_nutrition")],
+            [InlineKeyboardButton("◀️ Назад", callback_data=back_cb)],
         ]
         await query.edit_message_text("Здоровье:", reply_markup=InlineKeyboardMarkup(keyboard))
 
@@ -1186,14 +1199,34 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             while (next_start - today).days <= 0:
                 next_start = next_start + _td(days=length)
             days_to_next = (next_start - today).days
-            text = "Цикл:\n\nПоследнее начало: " + str(start) + "\nДлина: " + str(length) + " дней\nДень цикла: " + str(day_of_cycle) + "\nСледующий через: " + str(days_to_next) + " дней"
+            cycle_end = start + _td(days=5)
+            text = "Цикл:\n\nПоследнее начало: " + str(start) + "\nПримерное окончание: " + str(cycle_end) + "\nДлина: " + str(length) + " дней\nДень цикла: " + str(day_of_cycle) + "\nСледующий через: " + str(days_to_next) + " дней"
         else:
-            text = "Цикл ещё не отслеживается.\n\nНажмите кнопку ниже чтобы отметить начало цикла."
+            text = "Цикл ещё не отслеживается.\n\nОтметьте начало цикла чтобы я вела историю и прогнозировала следующие."
         keyboard = [
             [InlineKeyboardButton("📝 Отметить начало цикла", callback_data="cycle_start")],
-            [InlineKeyboardButton("◀️ Назад", callback_data="diary_health")],
+            [InlineKeyboardButton("📋 История циклов", callback_data="cycle_history")],
+            [InlineKeyboardButton("⚙️ Длина цикла", callback_data="cycle_set_length")],
+            [InlineKeyboardButton("◀️ Назад", callback_data="menu_health")],
         ]
         await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard))
+
+    elif query.data == "cycle_history":
+        async with db_pool.acquire() as conn:
+            cycles = await conn.fetch("SELECT start_date, cycle_length FROM cycle_tracking WHERE user_id = $1 ORDER BY start_date DESC LIMIT 12", user_id)
+        if cycles:
+            from datetime import timedelta as _td2
+            lines = [str(c["start_date"]) + " — примерно до " + str(c["start_date"] + _td2(days=5)) for c in cycles]
+            text = "История циклов (можно показать врачу):\n\n" + "\n".join(lines)
+        else:
+            text = "История циклов пуста."
+        back = InlineKeyboardButton("◀️ Назад", callback_data="health_cycle")
+        await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup([[back]]))
+
+    elif query.data == "cycle_set_length":
+        context.user_data["waiting_cycle_length"] = True
+        back = InlineKeyboardButton("◀️ Назад", callback_data="health_cycle")
+        await query.edit_message_text("Напишите длину вашего цикла в днях (обычно 28):", reply_markup=InlineKeyboardMarkup([[back]]))
 
     elif query.data == "cycle_start":
         context.user_data["waiting_cycle_date"] = True
@@ -1259,6 +1292,85 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             advice = "Очень высокий стресс! Остановитесь, сделайте 10 глубоких вдохов. Вы справитесь 💙"
         back = InlineKeyboardButton("◀️ Назад", callback_data="diary_health")
         await query.edit_message_text("Уровень стресса " + str(level) + "/10 отмечен.\n\n" + advice, reply_markup=InlineKeyboardMarkup([[back]]))
+
+    elif query.data == "health_weight":
+        async with db_pool.acquire() as conn:
+            logs = await conn.fetch("SELECT weight, height, created_at FROM weight_logs WHERE user_id = $1 ORDER BY created_at DESC LIMIT 8", user_id)
+        if logs:
+            lines = [l["created_at"].strftime("%d.%m.%Y") + ": " + str(l["weight"]) + " кг" + (" / " + str(l["height"]) + " см" if l["height"] else "") for l in logs]
+            diff = round(logs[0]["weight"] - logs[-1]["weight"], 1)
+            diff_str = ("+" if diff > 0 else "") + str(diff) + " кг за период"
+            text = "Вес и рост:\n\n" + "\n".join(lines) + "\n\nДинамика: " + diff_str
+        else:
+            text = "Записей пока нет.\n\nЗаписывайте вес раз в неделю чтобы отслеживать динамику!"
+        keyboard = [
+            [InlineKeyboardButton("➕ Записать вес", callback_data="weight_add")],
+            [InlineKeyboardButton("◀️ Назад", callback_data="menu_health")],
+        ]
+        await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard))
+
+    elif query.data == "weight_add":
+        context.user_data["waiting_weight"] = True
+        back = InlineKeyboardButton("◀️ Назад", callback_data="health_weight")
+        await query.edit_message_text("Напишите вес в кг (или вес и рост через пробел):\n\nНапример: 65 или 65 170", reply_markup=InlineKeyboardMarkup([[back]]))
+
+    elif query.data == "health_nutrition":
+        async with db_pool.acquire() as conn:
+            profile = await conn.fetchrow("SELECT * FROM nutrition_profile WHERE user_id = $1 ORDER BY created_at DESC LIMIT 1", user_id)
+        if profile:
+            text = "Нутрициология:\n\nРост: " + str(int(profile["height"])) + " см\nВес: " + str(int(profile["weight"])) + " кг\nЦель: " + str(profile["goal"]) + "\nКалорий в день: " + str(profile["calories_goal"]) + " ккал\n\nПишите мне что ели — я посчитаю калории!"
+            keyboard = [
+                [InlineKeyboardButton("✏️ Обновить профиль", callback_data="nutrition_setup")],
+                [InlineKeyboardButton("◀️ Назад", callback_data="menu_health")],
+            ]
+        else:
+            context.user_data["nutrition_setup"] = True
+            context.user_data["nutrition_step"] = "height"
+            keyboard = [[InlineKeyboardButton("◀️ Назад", callback_data="menu_health")]]
+            text = "Нутрициология\n\nДавайте настроим ваш профиль питания!\n\nНапишите ваш рост в см:"
+        await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard))
+
+    elif query.data == "nutrition_setup":
+        context.user_data["nutrition_setup"] = True
+        context.user_data["nutrition_step"] = "height"
+        back = InlineKeyboardButton("◀️ Назад", callback_data="health_nutrition")
+        await query.edit_message_text("Обновление профиля питания.\n\nВаш рост в см:", reply_markup=InlineKeyboardMarkup([[back]]))
+
+    elif query.data == "menu_goals":
+        async with db_pool.acquire() as conn:
+            goals = await conn.fetch("SELECT id, title, progress, deadline FROM goals WHERE user_id = $1 ORDER BY created_at DESC", user_id)
+        if goals:
+            lines = []
+            for g in goals:
+                bar = "█" * (g["progress"] // 10) + "░" * (10 - g["progress"] // 10)
+                dl = " (до " + str(g["deadline"]) + ")" if g["deadline"] else ""
+                lines.append(g["title"] + dl + "\n" + bar + " " + str(g["progress"]) + "%")
+            text = "Мои цели:\n\n" + "\n\n".join(lines)
+        else:
+            text = "Целей пока нет.\n\nДобавьте первую цель — это поможет фокусироваться каждый день!"
+        keyboard = [[InlineKeyboardButton("➕ Добавить цель", callback_data="goal_add")]]
+        if goals:
+            keyboard.append([InlineKeyboardButton("📊 Обновить прогресс", callback_data="goal_progress")])
+        keyboard.append([InlineKeyboardButton("◀️ Назад", callback_data="back_main")])
+        await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard))
+
+    elif query.data == "goal_add":
+        context.user_data["waiting_goal"] = True
+        back = InlineKeyboardButton("◀️ Назад", callback_data="menu_goals")
+        await query.edit_message_text("Напишите цель и дедлайн через запятую:\n\nНапример: Выучить английский, 31.12.2025\nИли просто: Начать бегать", reply_markup=InlineKeyboardMarkup([[back]]))
+
+    elif query.data == "goal_progress":
+        async with db_pool.acquire() as conn:
+            goals_p = await conn.fetch("SELECT id, title, progress FROM goals WHERE user_id = $1", user_id)
+        keyboard = [[InlineKeyboardButton(g["title"][:30] + " (" + str(g["progress"]) + "%)", callback_data="set_progress_" + str(g["id"]))] for g in goals_p]
+        keyboard.append([InlineKeyboardButton("◀️ Назад", callback_data="menu_goals")])
+        await query.edit_message_text("Выберите цель:", reply_markup=InlineKeyboardMarkup(keyboard))
+
+    elif query.data.startswith("set_progress_"):
+        goal_id_s = int(query.data.split("_")[-1])
+        context.user_data["waiting_progress_goal_id"] = goal_id_s
+        back = InlineKeyboardButton("◀️ Назад", callback_data="menu_goals")
+        await query.edit_message_text("Напишите прогресс в процентах (0-100):", reply_markup=InlineKeyboardMarkup([[back]]))
 
     elif query.data == "diary_finances":
         async with db_pool.acquire() as conn:
@@ -1962,6 +2074,101 @@ async def process_text_message(update: Update, context: ContextTypes.DEFAULT_TYP
         async with db_pool.acquire() as conn:
             await conn.execute("INSERT INTO notes (user_id, text) VALUES ($1, $2)", user_id, user_text)
         await update.message.reply_text("Заметка сохранена!" if ru else "Note saved!")
+        return
+
+    if context.user_data.get("waiting_weight"):
+        context.user_data["waiting_weight"] = False
+        try:
+            pw = user_text.strip().split()
+            weight_v = float(pw[0].replace(",", "."))
+            height_v = float(pw[1].replace(",", ".")) if len(pw) > 1 else None
+            async with db_pool.acquire() as conn:
+                await conn.execute("INSERT INTO weight_logs (user_id, weight, height) VALUES ($1, $2, $3)", user_id, weight_v, height_v)
+            rw = "Вес записан: " + str(weight_v) + " кг"
+            if height_v:
+                bmi = round(weight_v / ((height_v / 100) ** 2), 1)
+                rw += ", рост: " + str(height_v) + " см, ИМТ: " + str(bmi)
+            await update.message.reply_text(rw + " ⚖️")
+        except:
+            await update.message.reply_text("Не поняла. Напишите например: 65 или 65 170")
+        return
+
+    if context.user_data.get("nutrition_setup"):
+        step = context.user_data.get("nutrition_step", "height")
+        if step == "height":
+            try:
+                context.user_data["nutrition_height"] = float(user_text.replace(",", "."))
+                context.user_data["nutrition_step"] = "weight"
+                await update.message.reply_text("Отлично! Теперь напишите ваш вес в кг:")
+            except:
+                await update.message.reply_text("Напишите число, например: 165")
+            return
+        elif step == "weight":
+            try:
+                context.user_data["nutrition_weight"] = float(user_text.replace(",", "."))
+                context.user_data["nutrition_step"] = "goal"
+                keyboard = ReplyKeyboardMarkup([["Похудеть", "Набрать вес"], ["Поддержать вес", "Оздоровиться"]], one_time_keyboard=True, resize_keyboard=True)
+                await update.message.reply_text("Какая ваша цель?", reply_markup=keyboard)
+            except:
+                await update.message.reply_text("Напишите число, например: 60")
+            return
+        elif step == "goal":
+            h_n = context.user_data.get("nutrition_height", 165)
+            w_n = context.user_data.get("nutrition_weight", 60)
+            goal_n = user_text.strip()
+            if "похудеть" in goal_n.lower():
+                cal = int(w_n * 30 * 0.8)
+            elif "набрать" in goal_n.lower():
+                cal = int(w_n * 30 * 1.2)
+            else:
+                cal = int(w_n * 30)
+            async with db_pool.acquire() as conn:
+                await conn.execute("INSERT INTO nutrition_profile (user_id, height, weight, goal, calories_goal) VALUES ($1, $2, $3, $4, $5)", user_id, h_n, w_n, goal_n, cal)
+            context.user_data["nutrition_setup"] = False
+            context.user_data["nutrition_step"] = None
+            await update.message.reply_text("Профиль создан!\n\nРост: " + str(int(h_n)) + " см\nВес: " + str(int(w_n)) + " кг\nЦель: " + goal_n + "\nКалорий/день: " + str(cal) + " ккал\n\nТеперь пишите что ели и я посчитаю калории!", reply_markup=ReplyKeyboardRemove())
+            return
+
+    if context.user_data.get("waiting_goal"):
+        context.user_data["waiting_goal"] = False
+        parts_g = user_text.strip().split(",")
+        title_g = parts_g[0].strip()
+        deadline_g = None
+        if len(parts_g) > 1:
+            try:
+                from datetime import datetime as _dtg
+                deadline_g = _dtg.strptime(parts_g[1].strip(), "%d.%m.%Y").date()
+            except:
+                pass
+        async with db_pool.acquire() as conn:
+            await conn.execute("INSERT INTO goals (user_id, title, deadline) VALUES ($1, $2, $3)", user_id, title_g, deadline_g)
+        rg = "Цель добавлена: " + title_g + (" (до " + str(deadline_g) + ")" if deadline_g else "") + " 🎯"
+        await update.message.reply_text(rg)
+        return
+
+    if context.user_data.get("waiting_progress_goal_id"):
+        gid = context.user_data.pop("waiting_progress_goal_id")
+        try:
+            prog = max(0, min(100, int(user_text.strip())))
+            async with db_pool.acquire() as conn:
+                await conn.execute("UPDATE goals SET progress = $1 WHERE id = $2", prog, gid)
+            await update.message.reply_text("Прогресс обновлён: " + str(prog) + "% 🎯")
+        except:
+            await update.message.reply_text("Напишите число от 0 до 100")
+        return
+
+    if context.user_data.get("waiting_cycle_length"):
+        context.user_data["waiting_cycle_length"] = False
+        try:
+            lc = int(user_text.strip())
+            if 20 <= lc <= 45:
+                async with db_pool.acquire() as conn:
+                    await conn.execute("UPDATE cycle_tracking SET cycle_length = $1 WHERE user_id = $2", lc, user_id)
+                await update.message.reply_text("Длина цикла обновлена: " + str(lc) + " дней 🩸")
+            else:
+                await update.message.reply_text("Длина цикла должна быть от 20 до 45 дней.")
+        except:
+            await update.message.reply_text("Напишите число, например: 28")
         return
 
     if context.user_data.get("waiting_cycle_date"):
