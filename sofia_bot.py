@@ -235,6 +235,9 @@ SKILLS_RU = """Привет! Я София — ваш личный ИИ-асси
 Общение и память
 Запоминаю всё что вы рассказываете — предпочтения, привычки, важные даты. Отправляйте голосовые сообщения — не нужно ничего писать, я пойму и отвечу. Присылайте фото — опишу что на них или отвечу на вопрос по картинке. Отвечаю на любые вопросы и поддерживаю в трудный момент.
 
+Интернет и поиск
+Подключена к интернету — могу найти актуальную информацию прямо сейчас. Напишите "найди", "поищи" или "что такое..." и я отвечу со свежими данными и источниками.
+
 Планирование
 Составляю план на день, неделю или месяц. Устанавливаю напоминания в любое время. Веду планер регулярных занятий — тренировки, курсы, встречи.
 
@@ -250,7 +253,7 @@ SKILLS_RU = """Привет! Я София — ваш личный ИИ-асси
 • Настроение — трекер с историей за месяц
 
 Цели
-Добавляю цели с дедлайном и прогресс-баром. Сама оцениваю прогресс по тому что вы рассказали. Периодически напоминаю о целях.
+Добавляю цели с дедлайном и прогресс-баром. Сама оцениваю прогресс по тому что вы рассказала. Периодически напоминаю о целях.
 
 Дневник
 • Финансы — доходы и расходы, баланс за месяц
@@ -269,6 +272,8 @@ SKILLS_RU = """Привет! Я София — ваш личный ИИ-асси
 
 Дополнительно
 Генерирую изображения по описанию — напишите "нарисуй...". Погода сейчас, по часам и на неделю. Два языка — русский и английский 🇷🇺 🇬🇧
+
+Наш сайт — sofia-assistant.netlify.app
 
 Напишите /menu чтобы открыть меню 🌸"""
 
@@ -1749,25 +1754,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         text = f"Стиль общения изменён: {style_name}" if ru else f"Communication style changed: {style_name}"
         await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup([[back]]))
 
-    elif query.data == "confirm_forget":
-        keyboard = [
-            [InlineKeyboardButton("🗑 Да, удалить всё" if ru else "🗑 Yes, delete everything", callback_data="do_forget")],
-            [InlineKeyboardButton("❌ Отмена" if ru else "❌ Cancel", callback_data="menu_profile")],
-        ]
-        await query.edit_message_text("Вы уверены? Это удалит всю историю, заметки, напоминания и личные данные." if ru else "Are you sure? This will delete all history, notes, reminders and personal data.", reply_markup=InlineKeyboardMarkup(keyboard))
 
-    elif query.data == "do_forget":
-        async with db_pool.acquire() as conn:
-            for tbl in ["history", "reminders", "notes", "habits", "habit_logs", "finances", "user_memory", "sleep_logs", "shopping_list", "saved_recipes", "planner"]:
-                try:
-                    await conn.execute(f"DELETE FROM {tbl} WHERE user_id = $1", user_id)
-                except:
-                    pass
-            await conn.execute("UPDATE users SET onboarded = FALSE, name = NULL, morning_plan = FALSE, evening_news = FALSE, water_reminders = FALSE WHERE user_id = $1", user_id)
-        for job in context.application.job_queue.jobs():
-            if hasattr(job, "data") and (job.data == user_id or (isinstance(job.data, dict) and job.data.get("user_id") == user_id)):
-                job.schedule_removal()
-        await query.edit_message_text("Все ваши данные удалены. Можем начать заново — напишите /start 🌸" if ru else "All data deleted. Start fresh — type /start 🌸")
 
     elif query.data == "switch_lang_en":
         await save_user(user_id, language="en")
