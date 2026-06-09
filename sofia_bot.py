@@ -161,8 +161,8 @@ SYSTEM_PROMPT_RU = """Ты — София, личный ассистент и н
 наставник → на вы, мотивирующе, поддерживающе, вдохновляюще
 профессионал → на вы, чётко, коротко, без лишних слов и эмодзи
 
-ФОРМАТИРОВАНИЕ:
-Пиши как живой человек в мессенджере. Никаких # заголовков. Никаких --- разделителей. Никаких маркеров * или - в начале строк. Никаких звёздочек. Никакого Markdown. Только чистый текст и эмодзи умеренно. Короткие абзацы. Один вопрос за раз.
+ФОРМАТИРОВАНИЕ — СТРОГО:
+Пиши как живой человек в мессенджере. НИКОГДА не используй: # ## ### заголовки, * ** звёздочки, _ курсив, --- разделители, маркеры списков. Никакого Markdown вообще! Только чистый текст. Для списков используй цифры или • без звёздочек. Эмодзи умеренно. Короткие абзацы. Один вопрос за раз.
 
 ДАТА И ВРЕМЯ:
 Текущая дата и время указаны в начале сообщения. Ты ВСЕГДА знаешь дату и время. Никогда не говори что не знаешь.
@@ -175,7 +175,13 @@ SYSTEM_PROMPT_RU = """Ты — София, личный ассистент и н
 "расскажи больше" → "Ирине 17 лет, она из Волгограда, сейчас живёт и учится в Дубае. Увлекается ИИ и бизнесом."
 "контакты" → "irinasa_00@mail.ru"
 
-ЧТО УМЕЕШЬ: планирование, напоминания, поддержка, нутрициология, цели, любые вопросы.
+ЧТО УМЕЕШЬ: планирование, напоминания, поддержка, нутрициология, цели, рецепты, погода, любые вопросы.
+
+ПЛАНЕР:
+Если слышишь слова "всегда", "каждый", "каждую", "регулярно", "постоянно" + день недели + время — в конце ответа напиши: "Хотите добавить это в ваш планер? Напишите да и я запишу!"
+
+РЕЦЕПТЫ:
+Когда пишешь рецепт — в конце ВСЕГДА добавляй вопрос: "Хотите сохранить этот рецепт в ваши любимые?"
 
 Формат плана (только когда просят):
 09:00 — задача
@@ -1790,6 +1796,12 @@ async def process_text_message(update: Update, context: ContextTypes.DEFAULT_TYP
                 return
             except Exception as we:
                 logging.error("Погода ошибка: " + str(we))
+        # Регулярные занятия — предлагаем планер
+        regular_kw = ["всегда", "каждый ", "каждую ", "каждое ", "регулярно", "постоянно"]
+        import re as _re_p
+        if any(k in user_text.lower() for k in regular_kw) and _re_p.search(r"\d{1,2}[:.\s]\d{2}", user_text):
+            context.user_data["pending_planner_text"] = user_text
+
         # Напоминания
         if is_reminder_request(user_text):
             tz = pytz.timezone(user["timezone"] or "Europe/Moscow")
@@ -1830,7 +1842,19 @@ async def process_text_message(update: Update, context: ContextTypes.DEFAULT_TYP
         )
         reply = response.choices[0].message.content
         await add_history(user_id, "assistant", reply)
-        await update.message.reply_text(reply)
+        recipe_kw = ["ингредиент", "приготовлени", "рецепт", "ingredients", "recipe", "шаг 1", "step 1"]
+        is_recipe_reply = any(k in reply.lower() for k in recipe_kw) and len(reply) > 300
+        if is_recipe_reply:
+            context.user_data["last_recipe_title"] = user_text[:50]
+            context.user_data["last_recipe_content"] = reply
+            save_q = "\n\nХотите сохранить этот рецепт в ваши любимые?" if ru else "\n\nWould you like to save this recipe?"
+            kb = InlineKeyboardMarkup([[
+                InlineKeyboardButton("❤️ Сохранить", callback_data="save_recipe_yes"),
+                InlineKeyboardButton("✖️ Не нужно", callback_data="dont_save_recipe"),
+            ]])
+            await update.message.reply_text(reply + save_q, reply_markup=kb)
+        else:
+            await update.message.reply_text(reply)
         await notify_admin(context, user_name, username, user_text, reply)
     except Exception as e:
         logging.error(f"Ошибка: {e}")
