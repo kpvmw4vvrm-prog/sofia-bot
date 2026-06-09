@@ -334,6 +334,13 @@ async def init_db():
                 await conn.execute(f"ALTER TABLE users ADD COLUMN IF NOT EXISTS {col} {definition}")
             except:
                 pass
+        for col, definition in [
+            ("age", "INTEGER"), ("pregnant", "BOOLEAN DEFAULT FALSE"), ("medications", "TEXT"),
+        ]:
+            try:
+                await conn.execute(f"ALTER TABLE nutrition_profile ADD COLUMN IF NOT EXISTS {col} {definition}")
+            except:
+                pass
 
 async def get_user(user_id):
     async with db_pool.acquire() as conn:
@@ -2138,24 +2145,31 @@ async def process_text_message(update: Update, context: ContextTypes.DEFAULT_TYP
             h_n = context.user_data.get("nutrition_height", 165)
             w_n = context.user_data.get("nutrition_weight", 60)
             age_n = context.user_data.get("nutrition_age", 25)
-            goal_n = user_text.strip()
+            goal_n = context.user_data.get("nutrition_goal", "Поддержать вес")
+            preg_n = context.user_data.get("nutrition_pregnant", False)
             if "похудеть" in goal_n.lower():
                 cal = int(w_n * 30 * 0.8)
             elif "набрать" in goal_n.lower():
                 cal = int(w_n * 30 * 1.2)
             else:
                 cal = int(w_n * 30)
-            async with db_pool.acquire() as conn:
-                preg_n = context.user_data.get("nutrition_pregnant", False)
-                goal_n = context.user_data.get("nutrition_goal", "Поддержать вес")
-                if "похудеть" in goal_n.lower():
-                    cal = int(w_n * 30 * 0.8)
-                elif "набрать" in goal_n.lower():
-                    cal = int(w_n * 30 * 1.2)
-                else:
-                    cal = int(w_n * 30)
-                if preg_n: cal = max(cal, 2200)
-                await conn.execute("INSERT INTO nutrition_profile (user_id, height, weight, age, goal, calories_goal, pregnant, medications) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)", user_id, h_n, w_n, age_n, goal_n, cal, preg_n, meds_val)
+            if preg_n: cal = max(cal, 2200)
+            try:
+                async with db_pool.acquire() as conn:
+                    await conn.execute("INSERT INTO nutrition_profile (user_id, height, weight, age, goal, calories_goal, pregnant, medications) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)", user_id, h_n, w_n, age_n, goal_n, cal, preg_n, meds_val)
+                context.user_data["nutrition_setup"] = False
+                context.user_data["nutrition_step"] = None
+                recs = ""
+                if age_n and age_n < 25: recs += "\nВ вашем возрасте важны кальций и витамин D."
+                if preg_n: recs += "\nПри беременности добавьте фолиевую кислоту и омега-3."
+                if meds_val: recs += "\nНекоторые препараты влияют на усвоение витаминов."
+                reply_txt = "Профиль создан!\n\nРост: " + str(int(h_n)) + " см\nВес: " + str(int(w_n)) + " кг\nВозраст: " + str(age_n) + " лет\nЦель: " + goal_n + "\nКалорий/день: " + str(cal) + " ккал"
+                if recs: reply_txt += "\n\nРекомендации для вас:" + recs
+                reply_txt += "\n\nОтправляйте фото еды или пишите что ели — я посчитаю КБЖУ!"
+                await update.message.reply_text(reply_txt)
+            except Exception as ne:
+                logging.error("Ошибка нутрициологии: " + str(ne))
+                await update.message.reply_text("Что-то пошло не так. Попробуйте ещё раз — напишите /menu и откройте Здоровье → Нутрициология")
             context.user_data["nutrition_setup"] = False
             context.user_data["nutrition_step"] = None
             recs = ""
@@ -2463,6 +2477,8 @@ async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await process_text_message(update, context, user_text)
     except Exception as e:
         logging.error(f"Ошибка голосового: {e}")
+        import traceback
+        logging.error(traceback.format_exc())
         await update.message.reply_text("Не удалось обработать голосовое. Попробуйте текстом." if lang == "ru" else "Could not process voice. Try typing instead.")
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
@@ -2484,7 +2500,7 @@ async def stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
     )
 
 
-async def check_cycle_reminders(context):
+async def check_cycle_reminders(context: ContextTypes.DEFAULT_TYPE):
     try:
         async with db_pool.acquire() as conn:
             users = await conn.fetch("SELECT user_id FROM users WHERE onboarded = TRUE")
@@ -2508,7 +2524,7 @@ async def check_cycle_reminders(context):
                     name = user["name"] if user else ""
                     days_word = "день" if days_left == 1 else "дня"
                     msg = name + ", через " + str(days_left) + " " + days_word + " ожидается начало цикла. Подготовьтесь заранее! 🩸"
-                    await context.bot.send_message(chat_id=uid, text=msg)
+                    await context.application.bot.send_message(chat_id=uid, text=msg)
             except:
                 pass
     except Exception as e:
