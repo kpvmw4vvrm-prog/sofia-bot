@@ -306,6 +306,10 @@ async def init_db():
             """CREATE TABLE IF NOT EXISTS shopping_list (id SERIAL PRIMARY KEY, user_id BIGINT, item TEXT, done BOOLEAN DEFAULT FALSE, created_at TIMESTAMP DEFAULT NOW())""",
             """CREATE TABLE IF NOT EXISTS saved_recipes (id SERIAL PRIMARY KEY, user_id BIGINT, title TEXT, content TEXT, created_at TIMESTAMP DEFAULT NOW())""",
             """CREATE TABLE IF NOT EXISTS planner (id SERIAL PRIMARY KEY, user_id BIGINT, day_of_week INTEGER, time_str TEXT, title TEXT, created_at TIMESTAMP DEFAULT NOW())""",
+            """CREATE TABLE IF NOT EXISTS cycle_tracking (id SERIAL PRIMARY KEY, user_id BIGINT, start_date DATE, cycle_length INTEGER DEFAULT 28, created_at TIMESTAMP DEFAULT NOW())""",
+            """CREATE TABLE IF NOT EXISTS medications (id SERIAL PRIMARY KEY, user_id BIGINT, name TEXT, time_str TEXT, created_at TIMESTAMP DEFAULT NOW())""",
+            """CREATE TABLE IF NOT EXISTS medication_logs (id SERIAL PRIMARY KEY, user_id BIGINT, med_id INTEGER, taken_at TIMESTAMP DEFAULT NOW())""",
+            """CREATE TABLE IF NOT EXISTS stress_logs (id SERIAL PRIMARY KEY, user_id BIGINT, level INTEGER, note TEXT, created_at TIMESTAMP DEFAULT NOW())""",
         ]:
             await conn.execute(table)
         for col, definition in [
@@ -442,6 +446,14 @@ async def restore_reminders(application):
                     application.job_queue.run_daily(send_scheduled_reminder, time=time(hour=h, minute=m, tzinfo=tz), data={"user_id": user_id, "essence": r["text"]}, name="reminder_" + str(user_id) + "_" + str(h) + "_" + str(m))
                 except:
                     pass
+        async with db_pool.acquire() as conn:
+            meds_r = await conn.fetch("SELECT * FROM medications WHERE user_id = $1", user_id)
+        for med_r in meds_r:
+            try:
+                h_r, m_r = map(int, med_r["time_str"].split(":"))
+                application.job_queue.run_daily(send_med_reminder, time=time(hour=h_r, minute=m_r, tzinfo=tz), data={"user_id": user_id, "med_name": med_r["name"]}, name="med_" + str(user_id) + "_" + str(med_r["id"]))
+            except:
+                pass
         logging.info("Напоминания восстановлены из БД")
     except Exception as e:
         logging.error("Ошибка restore_reminders: " + str(e))
@@ -776,6 +788,14 @@ async def send_scheduled_reminder(context: ContextTypes.DEFAULT_TYPE):
     lang = user.get("language", "ru") if user else "ru"
     await context.bot.send_message(chat_id=user_id, text=t(lang, "reminder", name=name, text=essence))
 
+async def send_med_reminder(context: ContextTypes.DEFAULT_TYPE):
+    job_data = context.job.data
+    user_id = job_data["user_id"]
+    med_name = job_data["med_name"]
+    user = await get_user(user_id)
+    name = user["name"] if user else ""
+    await context.bot.send_message(chat_id=user_id, text="💊 " + name + ", не забудьте принять " + med_name + "!")
+
 async def send_water_reminder(context: ContextTypes.DEFAULT_TYPE):
     user_id = context.job.data
     user = await get_user(user_id)
@@ -1074,7 +1094,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             [InlineKeyboardButton("💧 Вода", callback_data="diary_water"), InlineKeyboardButton("💪 Привычки", callback_data="diary_habits")],
             [InlineKeyboardButton("📝 Заметки", callback_data="diary_notes"), InlineKeyboardButton("🍳 Рецепты", callback_data="diary_recipe")],
             [InlineKeyboardButton("🎬 Что посмотреть", callback_data="diary_movie"), InlineKeyboardButton("🛒 Покупки", callback_data="diary_shopping")],
-            [InlineKeyboardButton("📅 Планер", callback_data="diary_planner")],
+            [InlineKeyboardButton("📅 Планер", callback_data="diary_planner"), InlineKeyboardButton("🏥 Здоровье", callback_data="diary_health")],
             [InlineKeyboardButton("◀️ Назад", callback_data="back_main")],
         ]
         await query.edit_message_text("Дневник:" if ru else "Diary:", reply_markup=InlineKeyboardMarkup(keyboard))
@@ -1144,6 +1164,102 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             await conn.execute("DELETE FROM planner WHERE user_id = $1", user_id)
         back = InlineKeyboardButton("◀️ Назад", callback_data="diary_planner")
         await query.edit_message_text("Планер очищен.", reply_markup=InlineKeyboardMarkup([[back]]))
+    elif query.data == "diary_health":
+        keyboard = [
+            [InlineKeyboardButton("🩸 Цикл", callback_data="health_cycle"), InlineKeyboardButton("💊 Таблетки", callback_data="health_meds")],
+            [InlineKeyboardButton("😰 Стресс", callback_data="health_stress")],
+            [InlineKeyboardButton("◀️ Назад", callback_data="menu_diary")],
+        ]
+        await query.edit_message_text("Здоровье:", reply_markup=InlineKeyboardMarkup(keyboard))
+
+    elif query.data == "health_cycle":
+        async with db_pool.acquire() as conn:
+            last = await conn.fetchrow("SELECT start_date, cycle_length FROM cycle_tracking WHERE user_id = $1 ORDER BY created_at DESC LIMIT 1", user_id)
+        if last and last["start_date"]:
+            from datetime import date as _date, timedelta as _td
+            start = last["start_date"]
+            length = last["cycle_length"] or 28
+            today = _date.today()
+            days_since = (today - start).days
+            day_of_cycle = (days_since % length) + 1
+            next_start = start
+            while (next_start - today).days <= 0:
+                next_start = next_start + _td(days=length)
+            days_to_next = (next_start - today).days
+            text = "Цикл:\n\nПоследнее начало: " + str(start) + "\nДлина: " + str(length) + " дней\nДень цикла: " + str(day_of_cycle) + "\nСледующий через: " + str(days_to_next) + " дней"
+        else:
+            text = "Цикл ещё не отслеживается.\n\nНажмите кнопку ниже чтобы отметить начало цикла."
+        keyboard = [
+            [InlineKeyboardButton("📝 Отметить начало цикла", callback_data="cycle_start")],
+            [InlineKeyboardButton("◀️ Назад", callback_data="diary_health")],
+        ]
+        await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard))
+
+    elif query.data == "cycle_start":
+        context.user_data["waiting_cycle_date"] = True
+        back = InlineKeyboardButton("◀️ Назад", callback_data="health_cycle")
+        await query.edit_message_text("Напишите дату начала цикла в формате ДД.ММ.ГГГГ\n\nНапример: 01.06.2025", reply_markup=InlineKeyboardMarkup([[back]]))
+
+    elif query.data == "health_meds":
+        async with db_pool.acquire() as conn:
+            meds = await conn.fetch("SELECT id, name, time_str FROM medications WHERE user_id = $1 ORDER BY time_str", user_id)
+            lines = []
+            for med in meds:
+                taken = await conn.fetchval("SELECT COUNT(*) FROM medication_logs WHERE med_id = $1 AND taken_at >= NOW() - INTERVAL '1 day'", med["id"])
+                lines.append(("✅" if taken > 0 else "⬜") + " " + med["time_str"] + " — " + med["name"])
+        text = "Таблетки:\n\n" + "\n".join(lines) if lines else "Таблетки не добавлены."
+        keyboard = []
+        if meds:
+            keyboard.append([InlineKeyboardButton("✅ Отметить приём", callback_data="med_take")])
+        keyboard.append([InlineKeyboardButton("➕ Добавить таблетку", callback_data="med_add")])
+        keyboard.append([InlineKeyboardButton("◀️ Назад", callback_data="diary_health")])
+        await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard))
+
+    elif query.data == "med_add":
+        context.user_data["waiting_med_name"] = True
+        back = InlineKeyboardButton("◀️ Назад", callback_data="health_meds")
+        await query.edit_message_text("Напишите название и время через пробел\n\nНапример: Витамин D 08:00", reply_markup=InlineKeyboardMarkup([[back]]))
+
+    elif query.data == "med_take":
+        async with db_pool.acquire() as conn:
+            meds = await conn.fetch("SELECT id, name FROM medications WHERE user_id = $1", user_id)
+        keyboard = [[InlineKeyboardButton("💊 " + m["name"], callback_data="take_med_" + str(m["id"]))] for m in meds]
+        keyboard.append([InlineKeyboardButton("◀️ Назад", callback_data="health_meds")])
+        await query.edit_message_text("Какую таблетку принимали?", reply_markup=InlineKeyboardMarkup(keyboard))
+
+    elif query.data.startswith("take_med_"):
+        med_id = int(query.data.split("_")[-1])
+        async with db_pool.acquire() as conn:
+            med = await conn.fetchrow("SELECT name FROM medications WHERE id = $1", med_id)
+            await conn.execute("INSERT INTO medication_logs (user_id, med_id) VALUES ($1, $2)", user_id, med_id)
+        back = InlineKeyboardButton("◀️ Назад", callback_data="health_meds")
+        await query.edit_message_text("Приём " + med["name"] + " отмечен! 💊", reply_markup=InlineKeyboardMarkup([[back]]))
+
+    elif query.data == "health_stress":
+        keyboard = [
+            [InlineKeyboardButton("1", callback_data="stress_1"), InlineKeyboardButton("2", callback_data="stress_2"), InlineKeyboardButton("3", callback_data="stress_3")],
+            [InlineKeyboardButton("4", callback_data="stress_4"), InlineKeyboardButton("5", callback_data="stress_5"), InlineKeyboardButton("6", callback_data="stress_6")],
+            [InlineKeyboardButton("7", callback_data="stress_7"), InlineKeyboardButton("8", callback_data="stress_8"), InlineKeyboardButton("9", callback_data="stress_9")],
+            [InlineKeyboardButton("10", callback_data="stress_10")],
+            [InlineKeyboardButton("◀️ Назад", callback_data="diary_health")],
+        ]
+        await query.edit_message_text("Оцените уровень стресса:\n\n1 — всё спокойно\n10 — очень высокий стресс", reply_markup=InlineKeyboardMarkup(keyboard))
+
+    elif query.data.startswith("stress_") and query.data != "stress_logs":
+        level = int(query.data.replace("stress_", ""))
+        async with db_pool.acquire() as conn:
+            await conn.execute("INSERT INTO stress_logs (user_id, level) VALUES ($1, $2)", user_id, level)
+        if level <= 3:
+            advice = "Отличное состояние! Продолжайте в том же духе 🌸"
+        elif level <= 6:
+            advice = "Умеренный стресс. Попробуйте 5 минут глубокого дыхания или небольшую прогулку."
+        elif level <= 8:
+            advice = "Высокий стресс. Сделайте перерыв, выпейте воды, отдохните."
+        else:
+            advice = "Очень высокий стресс! Остановитесь, сделайте 10 глубоких вдохов. Вы справитесь 💙"
+        back = InlineKeyboardButton("◀️ Назад", callback_data="diary_health")
+        await query.edit_message_text("Уровень стресса " + str(level) + "/10 отмечен.\n\n" + advice, reply_markup=InlineKeyboardMarkup([[back]]))
+
     elif query.data == "diary_finances":
         async with db_pool.acquire() as conn:
             income = await conn.fetchval("SELECT SUM(amount) FROM finances WHERE user_id = $1 AND type = 'income' AND created_at >= NOW() - INTERVAL '30 days'", user_id)
@@ -1364,10 +1480,16 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     elif query.data == "do_forget":
         async with db_pool.acquire() as conn:
-            for tbl in ["history", "reminders", "notes", "habits", "habit_logs", "finances", "user_memory", "sleep_logs", "shopping_list"]:
-                await conn.execute(f"DELETE FROM {tbl} WHERE user_id = $1", user_id)
-            await conn.execute("UPDATE users SET onboarded = FALSE, name = NULL WHERE user_id = $1", user_id)
-        await query.edit_message_text(t(lang, "memory_cleared"))
+            for tbl in ["history", "reminders", "notes", "habits", "habit_logs", "finances", "user_memory", "sleep_logs", "shopping_list", "saved_recipes", "planner"]:
+                try:
+                    await conn.execute(f"DELETE FROM {tbl} WHERE user_id = $1", user_id)
+                except:
+                    pass
+            await conn.execute("UPDATE users SET onboarded = FALSE, name = NULL, morning_plan = FALSE, evening_news = FALSE, water_reminders = FALSE WHERE user_id = $1", user_id)
+        for job in context.application.job_queue.jobs():
+            if hasattr(job, "data") and (job.data == user_id or (isinstance(job.data, dict) and job.data.get("user_id") == user_id)):
+                job.schedule_removal()
+        await query.edit_message_text("Все ваши данные удалены. Можем начать заново — напишите /start 🌸" if ru else "All data deleted. Start fresh — type /start 🌸")
 
     elif query.data == "switch_lang_en":
         await save_user(user_id, language="en")
@@ -1840,6 +1962,35 @@ async def process_text_message(update: Update, context: ContextTypes.DEFAULT_TYP
         async with db_pool.acquire() as conn:
             await conn.execute("INSERT INTO notes (user_id, text) VALUES ($1, $2)", user_id, user_text)
         await update.message.reply_text("Заметка сохранена!" if ru else "Note saved!")
+        return
+
+    if context.user_data.get("waiting_cycle_date"):
+        context.user_data["waiting_cycle_date"] = False
+        try:
+            from datetime import datetime as _dt2
+            date_obj = _dt2.strptime(user_text.strip(), "%d.%m.%Y").date()
+            async with db_pool.acquire() as conn:
+                ex = await conn.fetchrow("SELECT cycle_length FROM cycle_tracking WHERE user_id = $1 ORDER BY created_at DESC LIMIT 1", user_id)
+                length = ex["cycle_length"] if ex else 28
+                await conn.execute("INSERT INTO cycle_tracking (user_id, start_date, cycle_length) VALUES ($1, $2, $3)", user_id, date_obj, length)
+            await update.message.reply_text("Дата начала цикла сохранена: " + str(date_obj) + " 🩸")
+        except:
+            await update.message.reply_text("Не поняла дату. Напишите в формате ДД.ММ.ГГГГ, например: 01.06.2025")
+        return
+
+    if context.user_data.get("waiting_med_name"):
+        context.user_data["waiting_med_name"] = False
+        parts = user_text.strip().rsplit(" ", 1)
+        med_name = parts[0] if len(parts) > 1 else user_text.strip()
+        med_time_str = parts[1] if len(parts) > 1 else "08:00"
+        h_m, m_m = extract_exact_time(med_time_str)
+        if h_m is None: h_m, m_m = 8, 0
+        ts = str(h_m).zfill(2) + ":" + str(m_m).zfill(2)
+        async with db_pool.acquire() as conn:
+            med_id = await conn.fetchval("INSERT INTO medications (user_id, name, time_str) VALUES ($1, $2, $3) RETURNING id", user_id, med_name, ts)
+        tz_u = pytz.timezone(user.get("timezone") or "Europe/Moscow")
+        context.application.job_queue.run_daily(send_med_reminder, time=time(hour=h_m, minute=m_m, tzinfo=tz_u), data={"user_id": user_id, "med_name": med_name}, name="med_" + str(user_id) + "_" + str(med_id))
+        await update.message.reply_text("Таблетка добавлена: " + med_name + " в " + ts + " 💊 Напоминание установлено!")
         return
 
     if context.user_data.get("waiting_finance"):
