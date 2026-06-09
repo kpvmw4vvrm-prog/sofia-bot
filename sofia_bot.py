@@ -162,7 +162,7 @@ SYSTEM_PROMPT_RU = """Ты — София, личный ассистент и н
 профессионал → на вы, чётко, коротко, без лишних слов и эмодзи
 
 ФОРМАТИРОВАНИЕ:
-Пиши как живой человек в мессенджере. Никаких # заголовков. Никаких --- разделителей. Никаких маркеров * или - в начале строк. Жирный (*слово*) только для самого важного, редко. Курсив (_слово_) иногда. Эмодзи умеренно. Короткие абзацы. Один вопрос за раз.
+Пиши как живой человек в мессенджере. Никаких # заголовков. Никаких --- разделителей. Никаких маркеров * или - в начале строк. Никаких звёздочек. Никакого Markdown. Только чистый текст и эмодзи умеренно. Короткие абзацы. Один вопрос за раз.
 
 ДАТА И ВРЕМЯ:
 Текущая дата и время указаны в начале сообщения. Ты ВСЕГДА знаешь дату и время. Никогда не говори что не знаешь.
@@ -298,6 +298,8 @@ async def init_db():
             """CREATE TABLE IF NOT EXISTS notes (id SERIAL PRIMARY KEY, user_id BIGINT, text TEXT, created_at TIMESTAMP DEFAULT NOW())""",
             """CREATE TABLE IF NOT EXISTS user_memory (id SERIAL PRIMARY KEY, user_id BIGINT, key TEXT, value TEXT, updated_at TIMESTAMP DEFAULT NOW())""",
             """CREATE TABLE IF NOT EXISTS shopping_list (id SERIAL PRIMARY KEY, user_id BIGINT, item TEXT, done BOOLEAN DEFAULT FALSE, created_at TIMESTAMP DEFAULT NOW())""",
+            """CREATE TABLE IF NOT EXISTS saved_recipes (id SERIAL PRIMARY KEY, user_id BIGINT, title TEXT, content TEXT, created_at TIMESTAMP DEFAULT NOW())""",
+            """CREATE TABLE IF NOT EXISTS planner (id SERIAL PRIMARY KEY, user_id BIGINT, day_of_week INTEGER, time_str TEXT, title TEXT, created_at TIMESTAMP DEFAULT NOW())""",
         ]:
             await conn.execute(table)
         for col, definition in [
@@ -654,6 +656,33 @@ async def get_ai_movie(lang="ru"):
         return response.choices[0].message.content
     except:
         return "Рекомендация недоступна." if lang == "ru" else "Recommendation unavailable."
+
+RECIPE_CATEGORIES = {
+    "soups": "супы и первые блюда",
+    "main": "вторые блюда из мяса рыбы или овощей",
+    "salads": "салаты и закуски",
+    "desserts": "десерты торты и выпечка",
+    "trends": "модные и трендовые блюда 2025",
+}
+DAYS_RU = {"понедельник": 0, "вторник": 1, "среду": 2, "среда": 2, "четверг": 3, "пятницу": 4, "пятница": 4, "субботу": 5, "суббота": 5, "воскресенье": 6}
+DAYS_RU_NAMES = ["Понедельник", "Вторник", "Среда", "Четверг", "Пятница", "Суббота", "Воскресенье"]
+
+async def get_recipe_list(cat_key, lang="ru"):
+    topic = RECIPE_CATEGORIES.get(cat_key, "блюда")
+    prompt = "Предложи 5 разных названий блюд на тему: " + topic + ". Напиши ТОЛЬКО пронумерованный список 1-5, только названия без описаний."
+    try:
+        resp = ai_client.chat.completions.create(model="gpt-4o-mini", messages=[{"role": "user", "content": prompt}], max_tokens=150, temperature=0.9)
+        return resp.choices[0].message.content.strip()
+    except:
+        return None
+
+async def get_full_recipe(dish_name, lang="ru"):
+    prompt = "Напиши подробный рецепт: " + dish_name + ". Включи ингредиенты и пошаговое приготовление. Пиши по-человечески, без звёздочек."
+    try:
+        resp = ai_client.chat.completions.create(model="gpt-4o-mini", messages=[{"role": "user", "content": prompt}], max_tokens=600, temperature=0.7)
+        return resp.choices[0].message.content.strip()
+    except:
+        return None
 
 async def rephrase_reminder(text, lang="ru"):
     try:
@@ -1058,9 +1087,30 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard))
 
     elif query.data == "diary_planner":
-        back = InlineKeyboardButton("Назад", callback_data="menu_diary")
-        text = "Планер — фиксированные занятия\n\nСкоро здесь появится полный планер!\n\nА пока расскажите о своих регулярных занятиях прямо в чате.\nНапример: каждую среду в 17:00 у дочки танцы"
-        await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup([[back]]))
+        async with db_pool.acquire() as conn:
+            events = await conn.fetch("SELECT id, day_of_week, time_str, title FROM planner WHERE user_id = $1 ORDER BY day_of_week, time_str", user_id)
+        if events:
+            lines = [DAYS_RU_NAMES[e["day_of_week"]] + " " + e["time_str"] + " — " + e["title"] for e in events]
+            text = "Ваш планер:\n\n" + "\n".join(lines)
+        else:
+            text = "Планер пуст.\n\nРасскажите о своих регулярных занятиях!\nНапример: каждую среду в 17:00 тренировка"
+        keyboard = [
+            [InlineKeyboardButton("➕ Добавить", callback_data="planner_add")],
+            [InlineKeyboardButton("🗑 Очистить", callback_data="planner_clear")],
+            [InlineKeyboardButton("◀️ Назад", callback_data="menu_diary")],
+        ]
+        await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard))
+
+    elif query.data == "planner_add":
+        context.user_data["waiting_planner"] = True
+        back = InlineKeyboardButton("◀️ Назад", callback_data="diary_planner")
+        await query.edit_message_text("Напишите занятие:\nкаждую ДЕНЬ в ЧЧ:ММ название\n\nНапример: каждую среду в 17:00 танцы", reply_markup=InlineKeyboardMarkup([[back]]))
+
+    elif query.data == "planner_clear":
+        async with db_pool.acquire() as conn:
+            await conn.execute("DELETE FROM planner WHERE user_id = $1", user_id)
+        back = InlineKeyboardButton("◀️ Назад", callback_data="diary_planner")
+        await query.edit_message_text("Планер очищен.", reply_markup=InlineKeyboardMarkup([[back]]))
     elif query.data == "diary_finances":
         async with db_pool.acquire() as conn:
             income = await conn.fetchval("SELECT SUM(amount) FROM finances WHERE user_id = $1 AND type = 'income' AND created_at >= NOW() - INTERVAL '30 days'", user_id)
@@ -1113,11 +1163,80 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup([[back]]))
 
     elif query.data == "diary_recipe":
-        await query.edit_message_text("Подбираю рецепт..." if ru else "Finding a recipe...")
-        recipe = await get_ai_recipe(lang)
-        keyboard = [[InlineKeyboardButton("🔄 Другой" if ru else "🔄 Another", callback_data="diary_recipe")], [InlineKeyboardButton("◀️ Назад" if ru else "◀️ Back", callback_data="menu_diary")]]
-        await query.edit_message_text(f"Рецепт дня:\n\n{recipe}" if ru else f"Recipe of the day:\n\n{recipe}", reply_markup=InlineKeyboardMarkup(keyboard))
+        keyboard = [
+            [InlineKeyboardButton("❤️ Мои рецепты", callback_data="recipes_saved")],
+            [InlineKeyboardButton("🎲 Рандомный рецепт", callback_data="recipes_random")],
+            [InlineKeyboardButton("◀️ Назад", callback_data="menu_diary")],
+        ]
+        await query.edit_message_text("Рецепты:", reply_markup=InlineKeyboardMarkup(keyboard))
 
+    elif query.data == "recipes_saved":
+        async with db_pool.acquire() as conn:
+            recipes = await conn.fetch("SELECT id, title FROM saved_recipes WHERE user_id = $1 ORDER BY created_at DESC LIMIT 10", user_id)
+        if not recipes:
+            back = InlineKeyboardButton("◀️ Назад", callback_data="diary_recipe")
+            await query.edit_message_text("Сохранённых рецептов пока нет. Попросите меня написать рецепт!", reply_markup=InlineKeyboardMarkup([[back]]))
+            return
+        keyboard = [[InlineKeyboardButton("❤️ " + r["title"][:30], callback_data="view_recipe_" + str(r["id"]))] for r in recipes]
+        keyboard.append([InlineKeyboardButton("◀️ Назад", callback_data="diary_recipe")])
+        await query.edit_message_text("Ваши любимые рецепты:", reply_markup=InlineKeyboardMarkup(keyboard))
+
+    elif query.data.startswith("view_recipe_"):
+        recipe_id = int(query.data.split("_")[-1])
+        async with db_pool.acquire() as conn:
+            recipe = await conn.fetchrow("SELECT title, content FROM saved_recipes WHERE id = $1", recipe_id)
+        if recipe:
+            back = InlineKeyboardButton("◀️ Назад", callback_data="recipes_saved")
+            del_btn = InlineKeyboardButton("🗑 Удалить", callback_data="del_recipe_" + str(recipe_id))
+            text = recipe["title"] + "\n\n" + recipe["content"]
+            if len(text) > 4000: text = text[:4000] + "..."
+            await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup([[back, del_btn]]))
+
+    elif query.data.startswith("del_recipe_"):
+        recipe_id = int(query.data.split("_")[-1])
+        async with db_pool.acquire() as conn:
+            await conn.execute("DELETE FROM saved_recipes WHERE id = $1", recipe_id)
+        back = InlineKeyboardButton("◀️ Назад", callback_data="recipes_saved")
+        await query.edit_message_text("Рецепт удалён.", reply_markup=InlineKeyboardMarkup([[back]]))
+
+    elif query.data == "recipes_random":
+        keyboard = [
+            [InlineKeyboardButton("🍲 Супы", callback_data="recipe_cat_soups"), InlineKeyboardButton("🍽 Второе", callback_data="recipe_cat_main")],
+            [InlineKeyboardButton("🥗 Салаты", callback_data="recipe_cat_salads"), InlineKeyboardButton("🍰 Десерты", callback_data="recipe_cat_desserts")],
+            [InlineKeyboardButton("🔥 Тренды", callback_data="recipe_cat_trends")],
+            [InlineKeyboardButton("◀️ Назад", callback_data="diary_recipe")],
+        ]
+        await query.edit_message_text("Выберите категорию:", reply_markup=InlineKeyboardMarkup(keyboard))
+
+    elif query.data.startswith("recipe_cat_"):
+        cat_key = query.data.replace("recipe_cat_", "")
+        cat_names = {"soups": "Супы", "main": "Второе", "salads": "Салаты", "desserts": "Десерты", "trends": "Тренды"}
+        cat_name = cat_names.get(cat_key, "Рецепты")
+        await query.edit_message_text("Подбираю " + cat_name + "...")
+        recipe_list = await get_recipe_list(cat_key, lang)
+        if not recipe_list:
+            back = InlineKeyboardButton("◀️ Назад", callback_data="recipes_random")
+            await query.edit_message_text("Рецепты временно недоступны.", reply_markup=InlineKeyboardMarkup([[back]]))
+            return
+        context.user_data["waiting_recipe_choice"] = cat_key
+        context.user_data["recipe_list_" + cat_key] = recipe_list
+        text = cat_name + "\n\n" + recipe_list + "\n\nНапишите цифру рецепта который хотите получить!"
+        keyboard = [
+            [InlineKeyboardButton("🔄 Другие варианты", callback_data="recipe_cat_" + cat_key)],
+            [InlineKeyboardButton("◀️ Назад", callback_data="recipes_random")],
+        ]
+        await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard))
+
+    elif query.data == "save_recipe_yes":
+        title = context.user_data.get("last_recipe_title", "Рецепт")
+        content = context.user_data.get("last_recipe_content", "")
+        if content:
+            async with db_pool.acquire() as conn:
+                await conn.execute("INSERT INTO saved_recipes (user_id, title, content) VALUES ($1, $2, $3)", user_id, title, content)
+        await query.edit_message_text("Рецепт сохранён в ваши любимые! ❤️")
+
+    elif query.data == "dont_save_recipe":
+        await query.edit_message_text("Хорошо, не сохраняю.")
     elif query.data == "diary_movie":
         await query.edit_message_text("Подбираю фильм..." if ru else "Finding a movie...")
         movie = await get_ai_movie(lang)
@@ -1215,20 +1334,31 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         mm = "✅" if user.get("morning_motivation") else "❌"
         w = "✅" if user.get("water_reminders") else "❌"
         ev = "✅" if user.get("evening_news") else "❌"
+        comm = user.get("comm_style", "наставник")
         if ru:
             keyboard = [
-                [InlineKeyboardButton(f"{mw} Погода утром", callback_data="toggle_morning_weather")],
-                [InlineKeyboardButton(f"{mm} Мотивация утром", callback_data="toggle_morning_motivation")],
-                [InlineKeyboardButton(f"{w} Напоминания о воде", callback_data="water_toggle")],
-                [InlineKeyboardButton(f"{ev} Вечерняя сводка", callback_data="toggle_evening_news")],
+                [InlineKeyboardButton("👤 Профиль", callback_data="menu_profile")],
+                [InlineKeyboardButton("💬 Стиль: " + comm, callback_data="change_comm_style")],
+                [InlineKeyboardButton("🌍 Изменить город", callback_data="profile_city")],
+                [InlineKeyboardButton("🌐 Switch to English", callback_data="switch_lang_en")],
+                [InlineKeyboardButton(mw + " Погода утром", callback_data="toggle_morning_weather")],
+                [InlineKeyboardButton(mm + " Мотивация утром", callback_data="toggle_morning_motivation")],
+                [InlineKeyboardButton(w + " Напоминания о воде", callback_data="water_toggle")],
+                [InlineKeyboardButton(ev + " Вечерняя сводка", callback_data="toggle_evening_news")],
+                [InlineKeyboardButton("🗑 Забудь всё обо мне", callback_data="confirm_forget")],
                 [InlineKeyboardButton("◀️ Назад", callback_data="back_main")],
             ]
         else:
             keyboard = [
-                [InlineKeyboardButton(f"{mw} Weather in morning", callback_data="toggle_morning_weather")],
-                [InlineKeyboardButton(f"{mm} Motivation in morning", callback_data="toggle_morning_motivation")],
-                [InlineKeyboardButton(f"{w} Water reminders", callback_data="water_toggle")],
-                [InlineKeyboardButton(f"{ev} Evening summary", callback_data="toggle_evening_news")],
+                [InlineKeyboardButton("👤 Profile", callback_data="menu_profile")],
+                [InlineKeyboardButton("💬 Style: " + comm, callback_data="change_comm_style")],
+                [InlineKeyboardButton("🌍 Change city", callback_data="profile_city")],
+                [InlineKeyboardButton("🌐 Switch to Russian", callback_data="switch_lang_ru")],
+                [InlineKeyboardButton(mw + " Weather in morning", callback_data="toggle_morning_weather")],
+                [InlineKeyboardButton(mm + " Motivation in morning", callback_data="toggle_morning_motivation")],
+                [InlineKeyboardButton(w + " Water reminders", callback_data="water_toggle")],
+                [InlineKeyboardButton(ev + " Evening summary", callback_data="toggle_evening_news")],
+                [InlineKeyboardButton("🗑 Forget everything", callback_data="confirm_forget")],
                 [InlineKeyboardButton("◀️ Back", callback_data="back_main")],
             ]
         await query.edit_message_text("Настройки" if ru else "Settings", reply_markup=InlineKeyboardMarkup(keyboard))
@@ -1482,6 +1612,52 @@ async def process_text_message(update: Update, context: ContextTypes.DEFAULT_TYP
             await notify_admin(context, user_name, username, user_text, reply)
             return
 
+    if context.user_data.get("waiting_recipe_choice"):
+        cat_key = context.user_data["waiting_recipe_choice"]
+        if user_text.strip().isdigit():
+            idx = int(user_text.strip())
+            recipe_list = context.user_data.get("recipe_list_" + cat_key, "")
+            lines = [l.strip() for l in recipe_list.split("\n") if l.strip() and l.strip()[0].isdigit()]
+            if 1 <= idx <= len(lines):
+                import re as _re
+                dish_name = _re.sub(r"^\d+[.)] ?", "", lines[idx-1]).strip()
+                context.user_data["waiting_recipe_choice"] = None
+                await context.bot.send_chat_action(chat_id=update.effective_chat.id, action="typing")
+                await update.message.reply_text("Готовлю рецепт: " + dish_name + "...")
+                recipe_content = await get_full_recipe(dish_name, lang)
+                if recipe_content:
+                    context.user_data["last_recipe_title"] = dish_name
+                    context.user_data["last_recipe_content"] = recipe_content
+                    save_text = "\n\nХотите сохранить этот рецепт в ваши любимые?"
+                    keyboard = InlineKeyboardMarkup([[
+                        InlineKeyboardButton("❤️ Сохранить", callback_data="save_recipe_yes"),
+                        InlineKeyboardButton("✖️ Не нужно", callback_data="dont_save_recipe"),
+                    ]])
+                    await update.message.reply_text(recipe_content + save_text, reply_markup=keyboard)
+                return
+
+    if context.user_data.get("waiting_planner"):
+        context.user_data["waiting_planner"] = False
+        text_lower = user_text.lower()
+        day_num = None
+        for day_name, day_idx in DAYS_RU.items():
+            if day_name in text_lower:
+                day_num = day_idx
+                break
+        h, m = extract_exact_time(user_text)
+        if day_num is not None and h is not None:
+            time_str = str(h).zfill(2) + ":" + str(m).zfill(2)
+            parts = user_text.split(str(h).zfill(2) + ":" + str(m).zfill(2))
+            event_title = parts[-1].strip().lstrip("-— ") if len(parts) > 1 else user_text
+            async with db_pool.acquire() as conn:
+                await conn.execute("INSERT INTO planner (user_id, day_of_week, time_str, title) VALUES ($1, $2, $3, $4)", user_id, day_num, time_str, event_title)
+            day_display = DAYS_RU_NAMES[day_num]
+            reply = "Записала в планер! Каждый " + day_display + " в " + time_str + " — " + event_title
+            await update.message.reply_text(reply)
+        else:
+            await update.message.reply_text("Не смогла распознать. Напишите например: каждую среду в 17:00 танцы")
+        return
+
     if context.user_data.get("waiting_interesting"):
         category = context.user_data["waiting_interesting"]
         if user_text.strip().isdigit():
@@ -1598,6 +1774,16 @@ async def process_text_message(update: Update, context: ContextTypes.DEFAULT_TYP
             try:
                 await context.bot.send_chat_action(chat_id=update.effective_chat.id, action="typing")
                 user_city = user.get("city") or "Москва"
+                if "завтра" in user_text.lower() or "tomorrow" in user_text.lower():
+                    forecast = await get_weather_forecast(user_city, lang)
+                    if forecast and "\n\n" in forecast:
+                        day_lines = forecast.split("\n\n")[1].split("\n")
+                        if len(day_lines) > 1:
+                            city_f = city_in_form(user_city) if lang == "ru" else user_city
+                            reply = "Завтра в " + city_f + ":\n" + day_lines[1]
+                            await update.message.reply_text(reply)
+                            await notify_admin(context, user_name, username, user_text, reply)
+                            return
                 weather = await get_weather(user_city, lang)
                 await update.message.reply_text(weather)
                 await notify_admin(context, user_name, username, user_text, weather)
