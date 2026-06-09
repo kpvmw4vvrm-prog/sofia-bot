@@ -323,6 +323,9 @@ async def init_db():
             """CREATE TABLE IF NOT EXISTS weight_logs (id SERIAL PRIMARY KEY, user_id BIGINT, weight FLOAT, height FLOAT, created_at TIMESTAMP DEFAULT NOW())""",
             """CREATE TABLE IF NOT EXISTS nutrition_profile (id SERIAL PRIMARY KEY, user_id BIGINT, height FLOAT, weight FLOAT, age INTEGER, goal TEXT, calories_goal INTEGER, pregnant BOOLEAN DEFAULT FALSE, medications TEXT, created_at TIMESTAMP DEFAULT NOW())""",
             """CREATE TABLE IF NOT EXISTS food_logs (id SERIAL PRIMARY KEY, user_id BIGINT, description TEXT, calories INTEGER, protein FLOAT, fat FLOAT, carbs FLOAT, created_at TIMESTAMP DEFAULT NOW())""",
+            """CREATE TABLE IF NOT EXISTS birthdays (id SERIAL PRIMARY KEY, user_id BIGINT, person_name TEXT, birth_date TEXT, created_at TIMESTAMP DEFAULT NOW())""",
+            """CREATE TABLE IF NOT EXISTS mood_logs (id SERIAL PRIMARY KEY, user_id BIGINT, mood INTEGER, note TEXT, created_at TIMESTAMP DEFAULT NOW())""",
+            """CREATE TABLE IF NOT EXISTS water_logs (id SERIAL PRIMARY KEY, user_id BIGINT, glasses INTEGER DEFAULT 0, log_date DATE DEFAULT CURRENT_DATE, created_at TIMESTAMP DEFAULT NOW())""",
         ]:
             await conn.execute(table)
         for col, definition in [
@@ -1118,7 +1121,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             [InlineKeyboardButton("💧 Вода", callback_data="diary_water"), InlineKeyboardButton("💪 Привычки", callback_data="diary_habits")],
             [InlineKeyboardButton("📝 Заметки", callback_data="diary_notes"), InlineKeyboardButton("🍳 Рецепты", callback_data="diary_recipe")],
             [InlineKeyboardButton("🎬 Что посмотреть", callback_data="diary_movie"), InlineKeyboardButton("🛒 Покупки", callback_data="diary_shopping")],
-            [InlineKeyboardButton("📅 Планер", callback_data="diary_planner")],
+            [InlineKeyboardButton("📅 Планер", callback_data="diary_planner"), InlineKeyboardButton("🎂 Дни рождения", callback_data="diary_birthdays")],
             [InlineKeyboardButton("◀️ Назад", callback_data="back_main")],
         ]
         await query.edit_message_text("Дневник:" if ru else "Diary:", reply_markup=InlineKeyboardMarkup(keyboard))
@@ -1128,12 +1131,16 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         interval = user.get("water_interval", 2)
         status = "Включены" if water_on else "Выключены"
         toggle_text = "Выключить" if water_on else "Включить"
+        async with db_pool.acquire() as conn:
+            wlog = await conn.fetchrow("SELECT glasses FROM water_logs WHERE user_id = $1 AND log_date = CURRENT_DATE", user_id)
+        glasses_today = wlog["glasses"] if wlog else 0
+        progress_bar = "💧" * glasses_today + "⬜" * max(0, 8 - glasses_today)
         keyboard = [
-            [InlineKeyboardButton("💧 Выпила воду!", callback_data="water_drink")],
+            [InlineKeyboardButton("💧 Выпила стакан (+1)", callback_data="water_drink_count")],
             [InlineKeyboardButton(toggle_text, callback_data="water_toggle")],
             [InlineKeyboardButton("Назад", callback_data="menu_diary")],
         ]
-        text = "Трекер воды\n\nНапоминания: " + status + "\nКаждые " + str(interval) + " часа\nНорма: 8 стаканов"
+        text = "Трекер воды\n\n" + progress_bar + "\nСегодня: " + str(glasses_today) + "/8 стаканов\n\nНапоминания: " + status + "\nКаждые " + str(interval) + " часа"
         await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard))
 
     elif query.data == "diary_habits":
@@ -1194,6 +1201,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             [InlineKeyboardButton("🩸 Цикл", callback_data="health_cycle"), InlineKeyboardButton("💊 Таблетки", callback_data="health_meds")],
             [InlineKeyboardButton("😰 Стресс", callback_data="health_stress"), InlineKeyboardButton("⚖️ Вес и рост", callback_data="health_weight")],
             [InlineKeyboardButton("🥗 Нутрициология", callback_data="health_nutrition")],
+            [InlineKeyboardButton("😊 Настроение", callback_data="health_mood")],
             [InlineKeyboardButton("◀️ Назад", callback_data=back_cb)],
         ]
         await query.edit_message_text("Здоровье:", reply_markup=InlineKeyboardMarkup(keyboard))
@@ -1257,8 +1265,9 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         keyboard = []
         if meds:
             keyboard.append([InlineKeyboardButton("✅ Отметить приём", callback_data="med_take")])
+            keyboard.append([InlineKeyboardButton("🗑 Удалить таблетку", callback_data="med_delete")])
         keyboard.append([InlineKeyboardButton("➕ Добавить таблетку", callback_data="med_add")])
-        keyboard.append([InlineKeyboardButton("◀️ Назад", callback_data="diary_health")])
+        keyboard.append([InlineKeyboardButton("◀️ Назад", callback_data="menu_health")])
         await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard))
 
     elif query.data == "med_add":
@@ -1796,6 +1805,139 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         reply = await analyze_image(image_data, "", lang)
         await query.edit_message_text(reply)
 
+    elif query.data == "med_delete":
+        async with db_pool.acquire() as conn:
+            meds_del = await conn.fetch("SELECT id, name, time_str FROM medications WHERE user_id = $1 ORDER BY time_str", user_id)
+        if not meds_del:
+            back = InlineKeyboardButton("◀️ Назад", callback_data="health_meds")
+            await query.edit_message_text("Таблеток нет.", reply_markup=InlineKeyboardMarkup([[back]]))
+            return
+        keyboard = [[InlineKeyboardButton("🗑 " + m["time_str"] + " " + m["name"], callback_data="del_med_" + str(m["id"]))] for m in meds_del]
+        keyboard.append([InlineKeyboardButton("◀️ Назад", callback_data="health_meds")])
+        await query.edit_message_text("Какую таблетку удалить?", reply_markup=InlineKeyboardMarkup(keyboard))
+
+    elif query.data.startswith("del_med_"):
+        med_id_del = int(query.data.split("_")[-1])
+        async with db_pool.acquire() as conn:
+            med_row = await conn.fetchrow("SELECT name FROM medications WHERE id = $1", med_id_del)
+            await conn.execute("DELETE FROM medication_logs WHERE med_id = $1", med_id_del)
+            await conn.execute("DELETE FROM medications WHERE id = $1", med_id_del)
+        for job in context.application.job_queue.get_jobs_by_name("med_" + str(user_id) + "_" + str(med_id_del)):
+            job.schedule_removal()
+        back = InlineKeyboardButton("◀️ Назад", callback_data="health_meds")
+        await query.edit_message_text("Таблетка " + (med_row["name"] if med_row else "") + " удалена 🗑", reply_markup=InlineKeyboardMarkup([[back]]))
+
+    elif query.data == "diary_birthdays":
+        async with db_pool.acquire() as conn:
+            bdays = await conn.fetch("SELECT id, person_name, birth_date FROM birthdays WHERE user_id = $1 ORDER BY birth_date", user_id)
+        if bdays:
+            from datetime import datetime as _dtb, date as _db
+            today = _db.today()
+            lines = []
+            for b in bdays:
+                try:
+                    bd = _dtb.strptime(b["birth_date"], "%d.%m").replace(year=today.year).date()
+                    if bd < today: bd = bd.replace(year=today.year + 1)
+                    days_left = (bd - today).days
+                    days_txt = "сегодня! 🎉" if days_left == 0 else "через " + str(days_left) + " дн."
+                    lines.append("🎂 " + b["person_name"] + " (" + b["birth_date"] + ") — " + days_txt)
+                except:
+                    lines.append("🎂 " + b["person_name"] + " (" + b["birth_date"] + ")")
+            text = "Дни рождения:\n\n" + "\n".join(lines)
+        else:
+            text = "Дней рождения ещё нет.\n\nДобавьте близких чтобы я напоминала заранее!"
+        keyboard = [
+            [InlineKeyboardButton("➕ Добавить", callback_data="birthday_add")],
+            [InlineKeyboardButton("🗑 Удалить", callback_data="birthday_delete")],
+            [InlineKeyboardButton("◀️ Назад", callback_data="menu_diary")],
+        ]
+        await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard))
+
+    elif query.data == "birthday_add":
+        context.user_data["waiting_birthday"] = True
+        back = InlineKeyboardButton("◀️ Назад", callback_data="diary_birthdays")
+        await query.edit_message_text("Напишите имя и дату через запятую:\n\nНапример: Мама, 15.03\nИли с годом: Папа, 10.07.1970", reply_markup=InlineKeyboardMarkup([[back]]))
+
+    elif query.data == "birthday_delete":
+        async with db_pool.acquire() as conn:
+            bdays_d = await conn.fetch("SELECT id, person_name, birth_date FROM birthdays WHERE user_id = $1", user_id)
+        if not bdays_d:
+            back = InlineKeyboardButton("◀️ Назад", callback_data="diary_birthdays")
+            await query.edit_message_text("Список пуст.", reply_markup=InlineKeyboardMarkup([[back]]))
+            return
+        keyboard = [[InlineKeyboardButton("🗑 " + b["person_name"] + " (" + b["birth_date"] + ")", callback_data="del_bday_" + str(b["id"]))] for b in bdays_d]
+        keyboard.append([InlineKeyboardButton("◀️ Назад", callback_data="diary_birthdays")])
+        await query.edit_message_text("Кого удалить?", reply_markup=InlineKeyboardMarkup(keyboard))
+
+    elif query.data.startswith("del_bday_"):
+        bday_id_del = int(query.data.split("_")[-1])
+        async with db_pool.acquire() as conn:
+            b_row = await conn.fetchrow("SELECT person_name FROM birthdays WHERE id = $1", bday_id_del)
+            await conn.execute("DELETE FROM birthdays WHERE id = $1", bday_id_del)
+        back = InlineKeyboardButton("◀️ Назад", callback_data="diary_birthdays")
+        await query.edit_message_text((b_row["person_name"] if b_row else "") + " удалён 🗑", reply_markup=InlineKeyboardMarkup([[back]]))
+
+    elif query.data == "health_mood":
+        keyboard = [
+            [InlineKeyboardButton("😄 Отлично", callback_data="mood_5"), InlineKeyboardButton("🙂 Хорошо", callback_data="mood_4")],
+            [InlineKeyboardButton("😐 Нормально", callback_data="mood_3"), InlineKeyboardButton("😔 Грустно", callback_data="mood_2")],
+            [InlineKeyboardButton("😢 Плохо", callback_data="mood_1")],
+            [InlineKeyboardButton("📊 История за месяц", callback_data="mood_history")],
+            [InlineKeyboardButton("◀️ Назад", callback_data="menu_health")],
+        ]
+        await query.edit_message_text("Как у вас настроение сейчас? 🌸", reply_markup=InlineKeyboardMarkup(keyboard))
+
+    elif query.data.startswith("mood_") and query.data != "mood_history":
+        mood_val = int(query.data.split("_")[1])
+        mood_names = {5: "😄 Отлично", 4: "🙂 Хорошо", 3: "😐 Нормально", 2: "😔 Грустно", 1: "😢 Плохо"}
+        async with db_pool.acquire() as conn:
+            await conn.execute("INSERT INTO mood_logs (user_id, mood) VALUES ($1, $2)", user_id, mood_val)
+        mood_msgs = {
+            5: "Отлично! Так держать! 🌟",
+            4: "Хорошее настроение — отличный день 🌸",
+            3: "Нормально — уже хорошо. Как прошёл день?",
+            2: "Грустновато. Хотите поговорить? 💙",
+            1: "Жаль слышать. Вы не одни — я здесь 🌸",
+        }
+        back = InlineKeyboardButton("◀️ Назад", callback_data="health_mood")
+        await query.edit_message_text(mood_names[mood_val] + " отмечено!\n\n" + mood_msgs[mood_val], reply_markup=InlineKeyboardMarkup([[back]]))
+
+    elif query.data == "mood_history":
+        async with db_pool.acquire() as conn:
+            logs = await conn.fetch("SELECT mood, created_at FROM mood_logs WHERE user_id = $1 AND created_at >= NOW() - INTERVAL '30 days' ORDER BY created_at", user_id)
+        mood_names = {5: "😄", 4: "🙂", 3: "😐", 2: "😔", 1: "😢"}
+        if logs:
+            from collections import defaultdict
+            days_mood = defaultdict(list)
+            for l in logs:
+                day = l["created_at"].strftime("%d.%m")
+                days_mood[day].append(l["mood"])
+            lines = []
+            for day, moods in list(days_mood.items())[-14:]:
+                avg = sum(moods) / len(moods)
+                emoji = mood_names.get(round(avg), "😐")
+                lines.append(day + " " + emoji + " " + str(round(avg, 1)))
+            text = "Настроение за месяц:\n\n" + "\n".join(lines)
+        else:
+            text = "Данных о настроении пока нет."
+        back = InlineKeyboardButton("◀️ Назад", callback_data="health_mood")
+        await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup([[back]]))
+
+    elif query.data == "water_drink_count":
+        async with db_pool.acquire() as conn:
+            wlog = await conn.fetchrow("SELECT id, glasses FROM water_logs WHERE user_id = $1 AND log_date = CURRENT_DATE", user_id)
+            if wlog:
+                new_glasses = wlog["glasses"] + 1
+                await conn.execute("UPDATE water_logs SET glasses = $1 WHERE id = $2", new_glasses, wlog["id"])
+            else:
+                new_glasses = 1
+                await conn.execute("INSERT INTO water_logs (user_id, glasses) VALUES ($1, $2)", user_id, new_glasses)
+        progress_bar = "💧" * new_glasses + "⬜" * max(0, 8 - new_glasses)
+        msg = "Стакан засчитан! " + str(new_glasses) + "/8 💧"
+        if new_glasses >= 8: msg = "Норма выполнена! 🎉 " + str(new_glasses) + " стаканов сегодня"
+        back = InlineKeyboardButton("◀️ Назад", callback_data="diary_water")
+        await query.edit_message_text(progress_bar + "\n\n" + msg, reply_markup=InlineKeyboardMarkup([[back]]))
+
     elif query.data == "close_menu":
         await query.edit_message_text("Меню закрыто. Напишите /menu чтобы открыть снова 🌸" if ru else "Menu closed. Type /menu to open again 🌸")
 
@@ -2297,6 +2439,19 @@ async def process_text_message(update: Update, context: ContextTypes.DEFAULT_TYP
                 await update.message.reply_text("Что-то пошло не так. Попробуйте ещё раз — напишите /menu и откройте Здоровье → Нутрициология")
             return
 
+    if context.user_data.get("waiting_birthday"):
+        context.user_data["waiting_birthday"] = False
+        parts_b = user_text.strip().split(",")
+        person_name_b = parts_b[0].strip()
+        birth_date_b = parts_b[1].strip() if len(parts_b) > 1 else ""
+        if person_name_b and birth_date_b:
+            async with db_pool.acquire() as conn:
+                await conn.execute("INSERT INTO birthdays (user_id, person_name, birth_date) VALUES ($1, $2, $3)", user_id, person_name_b, birth_date_b)
+            await update.message.reply_text("Добавила! Буду напоминать о дне рождения " + person_name_b + " 🎂")
+        else:
+            await update.message.reply_text("Напишите имя и дату через запятую, например: Мама, 15.03")
+        return
+
     if context.user_data.get("waiting_goal"):
         context.user_data["waiting_goal"] = False
         parts_g = user_text.strip().split(",")
@@ -2741,11 +2896,85 @@ async def check_goal_reminders(context: ContextTypes.DEFAULT_TYPE):
     except Exception as e:
         logging.error("Ошибка goal_check: " + str(e))
 
+
+async def send_weekly_habit_report(context: ContextTypes.DEFAULT_TYPE):
+    try:
+        async with db_pool.acquire() as conn:
+            users = await conn.fetch("SELECT user_id FROM users WHERE onboarded = TRUE")
+        for ur in users:
+            uid = ur["user_id"]
+            try:
+                async with db_pool.acquire() as conn:
+                    habits = await conn.fetch("SELECT id, name FROM habits WHERE user_id = $1", uid)
+                if not habits:
+                    continue
+                user = await get_user(uid)
+                name = user["name"] if user else ""
+                lang = user.get("language", "ru") if user else "ru"
+                lines = []
+                async with db_pool.acquire() as conn:
+                    for h in habits:
+                        count = await conn.fetchval(
+                            "SELECT COUNT(*) FROM habit_logs WHERE habit_id = $1 AND logged_at >= NOW() - INTERVAL '7 days'",
+                            h["id"]
+                        )
+                        bar = "█" * count + "░" * (7 - min(count, 7))
+                        pct = round(count / 7 * 100)
+                        lines.append(h["name"] + ": " + bar + " " + str(count) + "/7 (" + str(pct) + "%)")
+                avg_pct = sum(round(int(l.split("(")[1].replace("%)", "")) if "(" in l else 0) for l in lines) / len(lines) if lines else 0
+                if avg_pct >= 80:
+                    summary = "Отличная неделя! Вы молодец 🌟"
+                elif avg_pct >= 50:
+                    summary = "Хорошие результаты! Продолжайте в том же духе 💪"
+                else:
+                    summary = "На следующей неделе получится лучше 🌸"
+                msg = name + ", итоги недели по привычкам:\n\n" + "\n".join(lines) + "\n\n" + summary
+                await context.application.bot.send_message(chat_id=uid, text=msg)
+            except:
+                pass
+    except Exception as e:
+        logging.error("Ошибка weekly_habits: " + str(e))
+
+
+async def check_birthday_reminders(context: ContextTypes.DEFAULT_TYPE):
+    try:
+        async with db_pool.acquire() as conn:
+            all_bdays = await conn.fetch("SELECT user_id, person_name, birth_date FROM birthdays")
+        from datetime import date as _dbd
+        today = _dbd.today()
+        from datetime import datetime as _dtbd
+        for b in all_bdays:
+            try:
+                bd_str = b["birth_date"]
+                if len(bd_str) > 5:
+                    bd = _dtbd.strptime(bd_str, "%d.%m.%Y").date().replace(year=today.year)
+                else:
+                    bd = _dtbd.strptime(bd_str, "%d.%m").replace(year=today.year).date()
+                if bd < today:
+                    bd = bd.replace(year=today.year + 1)
+                days_left = (bd - today).days
+                if days_left in [7, 3, 1, 0]:
+                    uid = b["user_id"]
+                    user = await get_user(uid)
+                    name = user["name"] if user else ""
+                    if days_left == 0:
+                        msg = name + ", сегодня день рождения у " + b["person_name"] + "! 🎉🎂 Не забудьте поздравить!"
+                    else:
+                        days_word = "день" if days_left == 1 else str(days_left) + " дн."
+                        msg = name + ", через " + days_word + " день рождения у " + b["person_name"] + " 🎂"
+                    await context.application.bot.send_message(chat_id=uid, text=msg)
+            except:
+                pass
+    except Exception as e:
+        logging.error("Ошибка birthday_check: " + str(e))
+
 async def post_init(application):
     await init_db()
     await restore_reminders(application)
     application.job_queue.run_daily(check_cycle_reminders, time=time(hour=9, minute=0), name="cycle_check")
     application.job_queue.run_daily(check_goal_reminders, time=time(hour=12, minute=0), name="goal_check")
+    application.job_queue.run_daily(check_birthday_reminders, time=time(hour=10, minute=0), name="birthday_check")
+    application.job_queue.run_daily(send_weekly_habit_report, time=time(hour=20, minute=0), name="weekly_habits")
 
 if __name__ == "__main__":
     app = ApplicationBuilder().token(TELEGRAM_TOKEN).post_init(post_init).build()
