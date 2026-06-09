@@ -582,11 +582,11 @@ INTERESTING_QUERIES = {
     "inspiration": {"query": "inspiring success achievement positive story", "ru": "✨ Вдохновляющие истории", "en": "✨ Inspiring Stories"},
 }
 
-async def fetch_articles(query, count=10):
+async def fetch_articles(query, count=10, page=1):
     if not NEWS_API_KEY:
         return []
     try:
-        params = {"apiKey": NEWS_API_KEY, "q": query, "language": "en", "pageSize": count, "sortBy": "publishedAt"}
+        params = {"apiKey": NEWS_API_KEY, "q": query, "language": "en", "pageSize": count, "sortBy": "publishedAt", "page": page}
         async with httpx.AsyncClient(timeout=10) as http:
             response = await http.get("https://newsapi.org/v2/everything", params=params)
         data = response.json()
@@ -991,7 +991,10 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         # Очищаем кэш для свежей загрузки
         context.user_data.pop(f"interesting_articles_{category}", None)
         context.user_data.pop(f"interesting_translated_{category}", None)
-        articles = await fetch_articles(cat_info.get("query", "interesting news"), 10)
+        page = random.randint(1, 3)
+        articles = await fetch_articles(cat_info.get("query", "interesting news"), 10, page=page)
+        if not articles:
+            articles = await fetch_articles(cat_info.get("query", "interesting news"), 10, page=1)
         if not articles:
             back = InlineKeyboardButton("◀️ Назад" if ru else "◀️ Back", callback_data="menu_interesting")
             await query.edit_message_text("Материалы временно недоступны." if ru else "Content temporarily unavailable.", reply_markup=InlineKeyboardMarkup([[back]]))
@@ -1780,7 +1783,7 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
             dish_m = _rfc.search(r"Блюдо:\s*(.+)", food_res)
             async with db_pool.acquire() as conn:
                 await conn.execute("INSERT INTO food_logs (user_id, description, calories, protein, fat, carbs) VALUES ($1, $2, $3, $4, $5, $6)", user_id, dish_m.group(1).strip() if dish_m else "Блюдо", int(cal_m.group(1)) if cal_m else 0, float(prot_m.group(1)) if prot_m else 0, float(fat_m.group(1)) if fat_m else 0, float(carb_m.group(1)) if carb_m else 0)
-            await query.edit_message_text(food_res + "\n\nЗаписала в журнал питания! 🥗")
+            await query.edit_message_text(food_res + "\n\nЗаписала в журнал питания! 🥗\nЭто приблизительная оценка — для точности укажите граммы в подписи к фото.")
         else:
             await query.edit_message_text("Не смогла определить КБЖУ. Попробуйте другое фото.")
 
@@ -2040,7 +2043,12 @@ async def process_text_message(update: Update, context: ContextTypes.DEFAULT_TYP
             return
         time_str = str(h).zfill(2) + ":" + str(m).zfill(2)
         parts = original_text.split(time_str)
-        event_title = parts[-1].strip().lstrip("-— ") if len(parts) > 1 else original_text
+        import re as _rp2
+        raw_title = parts[-1].strip().lstrip("-— ") if len(parts) > 1 else original_text
+        event_title = _rp2.sub(r"(каждый|каждую|каждое|всегда|регулярно|по\s+\w+|у меня)\s*", "", raw_title, flags=_rp2.IGNORECASE).strip()
+        if not event_title or len(event_title) < 2:
+            words = [w for w in original_text.split() if len(w) > 3 and ":" not in w]
+            event_title = words[-1] if words else raw_title
         async with db_pool.acquire() as conn:
             await conn.execute("INSERT INTO planner (user_id, day_of_week, time_str, title) VALUES ($1, $2, $3, $4)", user_id, day_num, time_str, event_title)
         day_display = DAYS_RU_NAMES[day_num]
@@ -2066,9 +2074,11 @@ async def process_text_message(update: Update, context: ContextTypes.DEFAULT_TYP
             await update.message.reply_text("В какой день недели? Напишите например: пятница")
             return
         import re as _re_pl
-        event_title = _re_pl.sub(r"(каждый|каждую|каждое|всегда|регулярно)\s+\S+", "", original_text, flags=_re_pl.IGNORECASE).strip()
-        if not event_title:
-            event_title = original_text
+        event_title = _re_pl.sub(r"(каждый|каждую|каждое|всегда|регулярно|по\s+\w+)\s*", "", original_text, flags=_re_pl.IGNORECASE).strip()
+        event_title = _re_pl.sub(r"\d{1,2}[:.\s]\d{2}", "", event_title).strip().lstrip("-— ")
+        if not event_title or len(event_title) < 2:
+            words = [w for w in original_text.split() if len(w) > 3 and ":" not in w]
+            event_title = words[-1] if words else original_text
         async with db_pool.acquire() as conn:
             await conn.execute("INSERT INTO planner (user_id, day_of_week, time_str, title) VALUES ($1, $2, $3, $4)", user_id, day_num, time_str, event_title)
         day_display = DAYS_RU_NAMES[day_num]
@@ -2478,7 +2488,7 @@ async def process_text_message(update: Update, context: ContextTypes.DEFAULT_TYP
                     dish_m = _ref.search(r"Блюдо:\s*(.+)", food_text_res)
                     async with db_pool.acquire() as conn:
                         await conn.execute("INSERT INTO food_logs (user_id, description, calories, protein, fat, carbs) VALUES ($1, $2, $3, $4, $5, $6)", user_id, dish_m.group(1).strip() if dish_m else user_text[:50], int(cal_m.group(1)) if cal_m else 0, float(prot_m.group(1)) if prot_m else 0, float(fat_m.group(1)) if fat_m else 0, float(carb_m.group(1)) if carb_m else 0)
-                    await update.message.reply_text(food_text_res + "\n\nЗаписала в журнал питания! 🥗")
+                    await update.message.reply_text(food_text_res + "\n\nЗаписала в журнал питания! 🥗\nЭто примерная оценка — точность зависит от размера порции.")
                     await notify_admin(context, user_name, username, user_text, food_text_res[:200])
                     return
             except Exception as fe:
@@ -2552,7 +2562,7 @@ async def process_text_message(update: Update, context: ContextTypes.DEFAULT_TYP
 
 async def analyze_food_photo(image_data):
     try:
-        prompt = "Определи что на фото еды. Дай оценку КБЖУ в формате:\nБлюдо: название\nКалории: число\nБелки: число г\nЖиры: число г\nУглеводы: число г\nКомментарий: краткий совет по составу."
+        prompt = "Определи что на фото еды. Оцени порцию и дай КБЖУ.\nОтвечай ТОЛЬКО в формате:\nБлюдо: название\nПорция: примерно X г\nКалории: число\nБелки: число г\nЖиры: число г\nУглеводы: число г\nКомментарий: совет"
         response = ai_client.chat.completions.create(
             model="gpt-4o-mini",
             messages=[{"role": "user", "content": [{"type": "text", "text": prompt}, {"type": "image_url", "image_url": {"url": "data:image/jpeg;base64," + image_data}}]}],
@@ -2613,7 +2623,7 @@ async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
                         float(fat_m.group(1)) if fat_m else 0,
                         float(carb_m.group(1)) if carb_m else 0
                     )
-                await update.message.reply_text(food_res + "\n\nЗаписала в журнал! 🥗")
+                await update.message.reply_text(food_res + "\n\nЗаписала в журнал! 🥗\nДля точности укажите граммы в подписи к фото.")
                 await notify_admin(context, user_name, username, "[Фото еды] " + caption, food_res[:200])
                 return
         reply = await analyze_image(image_data, caption, lang)
@@ -2698,10 +2708,44 @@ async def check_cycle_reminders(context: ContextTypes.DEFAULT_TYPE):
     except Exception as e:
         logging.error("Ошибка cycle_check: " + str(e))
 
+
+async def check_goal_reminders(context: ContextTypes.DEFAULT_TYPE):
+    try:
+        async with db_pool.acquire() as conn:
+            users = await conn.fetch("SELECT user_id FROM users WHERE onboarded = TRUE")
+        import random as _rg
+        from datetime import date as _dg
+        today = _dg.today()
+        for ur in users:
+            uid = ur["user_id"]
+            try:
+                async with db_pool.acquire() as conn:
+                    goals = await conn.fetch("SELECT id, title, progress FROM goals WHERE user_id = $1 AND progress < 100", uid)
+                if not goals:
+                    continue
+                async with db_pool.acquire() as conn:
+                    last_msg = await conn.fetchval("SELECT created_at FROM history WHERE user_id = $1 AND role = 'assistant' ORDER BY created_at DESC LIMIT 1", uid)
+                if last_msg and (today - last_msg.date()).days < 3:
+                    continue
+                user = await get_user(uid)
+                name = user["name"] if user else ""
+                goal = _rg.choice(list(goals))
+                variants = [
+                    name + ", как дела с целью \"" + goal["title"] + "\"? 🎯 Расскажите что удалось сделать!",
+                    "Привет, " + name + "! Есть ли прогресс по цели \"" + goal["title"] + "\"? 🌸",
+                    name + ", помните про цель \"" + goal["title"] + "\"? Прогресс " + str(goal["progress"]) + "%. Что нового? 💪",
+                ]
+                await context.application.bot.send_message(chat_id=uid, text=_rg.choice(variants))
+            except:
+                pass
+    except Exception as e:
+        logging.error("Ошибка goal_check: " + str(e))
+
 async def post_init(application):
     await init_db()
     await restore_reminders(application)
     application.job_queue.run_daily(check_cycle_reminders, time=time(hour=9, minute=0), name="cycle_check")
+    application.job_queue.run_daily(check_goal_reminders, time=time(hour=12, minute=0), name="goal_check")
 
 if __name__ == "__main__":
     app = ApplicationBuilder().token(TELEGRAM_TOKEN).post_init(post_init).build()
