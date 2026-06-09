@@ -1,1819 +1,1675 @@
-import os
 import logging
-import asyncio
-import aiohttp
+import re
+import os
 import json
-import random
-from datetime import datetime, timedelta
-from typing import Optional
-import asyncpg
-from aiogram import Bot, Dispatcher, F
-from aiogram.types import (
-    Message, CallbackQuery, InlineKeyboardMarkup, InlineKeyboardButton,
-    ReplyKeyboardRemove, FSInputFile, BufferedInputFile
-)
-from aiogram.filters import Command
-from aiogram.fsm.context import FSMContext
-from aiogram.fsm.state import State, StatesGroup
-from aiogram.fsm.storage.memory import MemoryStorage
 import base64
 import tempfile
+import httpx
+import random
+from datetime import datetime, time, timedelta
+from timezonefinder import TimezoneFinder
+import pytz
+import asyncpg
+import assemblyai as aai
+from telegram import Update, ReplyKeyboardMarkup, ReplyKeyboardRemove, InlineKeyboardButton, InlineKeyboardMarkup
+from telegram.ext import (
+    ApplicationBuilder, CommandHandler, MessageHandler, CallbackQueryHandler,
+    filters, ContextTypes, ConversationHandler
+)
+from openai import OpenAI
 
-# ─── Logging ───────────────────────────────────────────────────────────────────
-logging.basicConfig(level=logging.INFO, format="%(asctime)s %(levelname)s %(message)s")
-log = logging.getLogger(__name__)
+TELEGRAM_TOKEN = os.environ.get("TELEGRAM_TOKEN")
+OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY")
+ASSEMBLYAI_KEY = os.environ.get("ASSEMBLYAI_KEY")
+WEATHER_API_KEY = os.environ.get("WEATHER_API_KEY")
+NEWS_API_KEY = os.environ.get("NEWS_API_KEY")
+ADMIN_ID = 944447597
+DATABASE_URL = os.environ.get("DATABASE_URL")
 
-# ─── Config ────────────────────────────────────────────────────────────────────
-BOT_TOKEN    = os.getenv("BOT_TOKEN", "")
-OPENAI_KEY   = os.getenv("OPENAI_API_KEY", "")
-OPENAI_BASE  = os.getenv("OPENAI_BASE_URL", "https://api.aitunnel.ru/v1/")
-WEATHER_KEY  = os.getenv("WEATHER_API_KEY", "")
-NEWS_KEY     = os.getenv("NEWS_API_KEY", "")
-ASSEMBLY_KEY = os.getenv("ASSEMBLYAI_API_KEY", "")
-DATABASE_URL = os.getenv("DATABASE_URL", "")
-ADMIN_ID     = int(os.getenv("ADMIN_ID", "944447597"))
-MODEL        = "gpt-4o-mini"
-IMAGE_MODEL  = "gpt-image-1-mini"
+logging.basicConfig(level=logging.INFO)
+ai_client = OpenAI(api_key=OPENAI_API_KEY, base_url="https://api.aitunnel.ru/v1/")
+aai.settings.api_key = ASSEMBLYAI_KEY
+tf = TimezoneFinder()
 
-# ─── States ────────────────────────────────────────────────────────────────────
-class States(StatesGroup):
-    # Finance
-    finance_add_income   = State()
-    finance_add_expense  = State()
-    # Sleep
-    sleep_input          = State()
-    # Water
-    water_input          = State()
-    # Habits
-    habit_add            = State()
-    # Notes
-    note_add             = State()
-    # Shopping
-    shopping_add         = State()
-    # Reminders
-    reminder_text        = State()
-    reminder_time        = State()
-    # City
-    city_input           = State()
-    # Planner
-    planner_add          = State()
-    planner_day          = State()
-    planner_time         = State()
-    planner_title        = State()
-    # Recipes
-    recipe_search        = State()
-    # Health - cycle
-    cycle_start_date     = State()
-    cycle_length         = State()
-    # Health - pills
-    pill_name            = State()
-    pill_time            = State()
-    # Health - stress
-    stress_score         = State()
-    # Goals
-    goal_title           = State()
-    goal_description     = State()
-    goal_update          = State()
-    # Watch later
-    watch_add            = State()
+ASK_NAME, ASK_CITY, ASK_LANGUAGE, ASK_MORNING_PLAN, ASK_MORNING_TIME, ASK_REMINDERS, ASK_EVENING_NEWS, ASK_EVENING_TIME, ASK_COMM_STYLE = range(9)
 
-# ─── Bot & Dispatcher ──────────────────────────────────────────────────────────
-bot = Bot(token=BOT_TOKEN)
-dp  = Dispatcher(storage=MemoryStorage())
-db: asyncpg.Pool = None  # type: ignore
-
-# ─── DB Init ───────────────────────────────────────────────────────────────────
-DB_SCHEMA = """
-CREATE TABLE IF NOT EXISTS users (
-    user_id     BIGINT PRIMARY KEY,
-    username    TEXT,
-    first_name  TEXT,
-    city        TEXT DEFAULT 'Москва',
-    language    TEXT DEFAULT 'ru',
-    style       TEXT DEFAULT 'girlfriend',
-    morning_weather  BOOLEAN DEFAULT TRUE,
-    morning_motivation BOOLEAN DEFAULT TRUE,
-    water_remind BOOLEAN DEFAULT TRUE,
-    evening_summary BOOLEAN DEFAULT TRUE,
-    created_at  TIMESTAMP DEFAULT NOW()
-);
-
-CREATE TABLE IF NOT EXISTS user_memory (
-    id          SERIAL PRIMARY KEY,
-    user_id     BIGINT,
-    memory_text TEXT,
-    created_at  TIMESTAMP DEFAULT NOW()
-);
-
-CREATE TABLE IF NOT EXISTS reminders (
-    id          SERIAL PRIMARY KEY,
-    user_id     BIGINT,
-    text        TEXT,
-    remind_at   TIMESTAMP,
-    repeat_rule TEXT,
-    is_active   BOOLEAN DEFAULT TRUE,
-    created_at  TIMESTAMP DEFAULT NOW()
-);
-
-CREATE TABLE IF NOT EXISTS finances (
-    id          SERIAL PRIMARY KEY,
-    user_id     BIGINT,
-    type        TEXT,
-    amount      NUMERIC,
-    description TEXT,
-    created_at  TIMESTAMP DEFAULT NOW()
-);
-
-CREATE TABLE IF NOT EXISTS sleep_log (
-    id          SERIAL PRIMARY KEY,
-    user_id     BIGINT,
-    hours       NUMERIC,
-    quality     TEXT,
-    log_date    DATE DEFAULT CURRENT_DATE,
-    created_at  TIMESTAMP DEFAULT NOW()
-);
-
-CREATE TABLE IF NOT EXISTS water_log (
-    id          SERIAL PRIMARY KEY,
-    user_id     BIGINT,
-    ml          INT,
-    log_date    DATE DEFAULT CURRENT_DATE,
-    created_at  TIMESTAMP DEFAULT NOW()
-);
-
-CREATE TABLE IF NOT EXISTS habits (
-    id          SERIAL PRIMARY KEY,
-    user_id     BIGINT,
-    name        TEXT,
-    streak      INT DEFAULT 0,
-    last_done   DATE,
-    created_at  TIMESTAMP DEFAULT NOW()
-);
-
-CREATE TABLE IF NOT EXISTS notes (
-    id          SERIAL PRIMARY KEY,
-    user_id     BIGINT,
-    text        TEXT,
-    created_at  TIMESTAMP DEFAULT NOW()
-);
-
-CREATE TABLE IF NOT EXISTS shopping (
-    id          SERIAL PRIMARY KEY,
-    user_id     BIGINT,
-    item        TEXT,
-    is_done     BOOLEAN DEFAULT FALSE,
-    created_at  TIMESTAMP DEFAULT NOW()
-);
-
-CREATE TABLE IF NOT EXISTS recipes (
-    id          SERIAL PRIMARY KEY,
-    user_id     BIGINT,
-    title       TEXT,
-    content     TEXT,
-    created_at  TIMESTAMP DEFAULT NOW()
-);
-
-CREATE TABLE IF NOT EXISTS planner (
-    id          SERIAL PRIMARY KEY,
-    user_id     BIGINT,
-    title       TEXT,
-    weekday     INT,
-    time_str    TEXT,
-    created_at  TIMESTAMP DEFAULT NOW()
-);
-
-CREATE TABLE IF NOT EXISTS health_cycle (
-    id          SERIAL PRIMARY KEY,
-    user_id     BIGINT,
-    start_date  DATE,
-    cycle_days  INT DEFAULT 28,
-    created_at  TIMESTAMP DEFAULT NOW()
-);
-
-CREATE TABLE IF NOT EXISTS pills (
-    id          SERIAL PRIMARY KEY,
-    user_id     BIGINT,
-    name        TEXT,
-    remind_time TEXT,
-    is_active   BOOLEAN DEFAULT TRUE,
-    created_at  TIMESTAMP DEFAULT NOW()
-);
-
-CREATE TABLE IF NOT EXISTS stress_log (
-    id          SERIAL PRIMARY KEY,
-    user_id     BIGINT,
-    score       INT,
-    log_date    DATE DEFAULT CURRENT_DATE,
-    created_at  TIMESTAMP DEFAULT NOW()
-);
-
-CREATE TABLE IF NOT EXISTS goals (
-    id          SERIAL PRIMARY KEY,
-    user_id     BIGINT,
-    title       TEXT,
-    description TEXT,
-    progress    INT DEFAULT 0,
-    is_done     BOOLEAN DEFAULT FALSE,
-    created_at  TIMESTAMP DEFAULT NOW()
-);
-
-CREATE TABLE IF NOT EXISTS watch_list (
-    id          SERIAL PRIMARY KEY,
-    user_id     BIGINT,
-    title       TEXT,
-    genre       TEXT,
-    is_watched  BOOLEAN DEFAULT FALSE,
-    created_at  TIMESTAMP DEFAULT NOW()
-);
-
-CREATE TABLE IF NOT EXISTS conversation_history (
-    id          SERIAL PRIMARY KEY,
-    user_id     BIGINT,
-    role        TEXT,
-    content     TEXT,
-    created_at  TIMESTAMP DEFAULT NOW()
-);
-"""
-
-async def init_db():
-    global db
-    db = await asyncpg.create_pool(DATABASE_URL, min_size=2, max_size=10)
-    async with db.acquire() as conn:
-        await conn.execute(DB_SCHEMA)
-    log.info("DB initialized")
-
-async def ensure_user(user_id: int, username: str = "", first_name: str = ""):
-    await db.execute(
-        """INSERT INTO users(user_id, username, first_name)
-           VALUES($1,$2,$3) ON CONFLICT(user_id) DO NOTHING""",
-        user_id, username, first_name
-    )
-
-async def get_user(user_id: int):
-    return await db.fetchrow("SELECT * FROM users WHERE user_id=$1", user_id)
-
-# ─── Keyboards ─────────────────────────────────────────────────────────────────
-def kb_main():
-    return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="🌅 Утро", callback_data="menu_morning"),
-         InlineKeyboardButton(text="📒 Дневник", callback_data="menu_diary")],
-        [InlineKeyboardButton(text="✨ Интересное", callback_data="menu_interesting"),
-         InlineKeyboardButton(text="⚙️ Настройки", callback_data="menu_settings")],
-        [InlineKeyboardButton(text="✖️ Закрыть меню", callback_data="menu_close")],
-    ])
-
-def kb_diary():
-    return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="💰 Финансы", callback_data="diary_finance"),
-         InlineKeyboardButton(text="😴 Сон", callback_data="diary_sleep")],
-        [InlineKeyboardButton(text="💧 Вода", callback_data="diary_water"),
-         InlineKeyboardButton(text="✅ Привычки", callback_data="diary_habits")],
-        [InlineKeyboardButton(text="📝 Заметки", callback_data="diary_notes"),
-         InlineKeyboardButton(text="🍳 Рецепты", callback_data="diary_recipes")],
-        [InlineKeyboardButton(text="🎬 Что посмотреть", callback_data="diary_watch"),
-         InlineKeyboardButton(text="🗓 Планер", callback_data="diary_planner")],
-        [InlineKeyboardButton(text="🛒 Покупки", callback_data="diary_shopping")],
-        [InlineKeyboardButton(text="◀️ Назад", callback_data="menu_back")],
-    ])
-
-def kb_settings():
-    return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="👤 Профиль", callback_data="settings_profile"),
-         InlineKeyboardButton(text="💬 Стиль общения", callback_data="settings_style")],
-        [InlineKeyboardButton(text="🏙 Город", callback_data="settings_city"),
-         InlineKeyboardButton(text="🌍 Язык", callback_data="settings_lang")],
-        [InlineKeyboardButton(text="🌤 Погода утром", callback_data="toggle_morning_weather"),
-         InlineKeyboardButton(text="💪 Мотивация утром", callback_data="toggle_morning_motivation")],
-        [InlineKeyboardButton(text="💧 Напомн. о воде", callback_data="toggle_water_remind"),
-         InlineKeyboardButton(text="🌙 Вечерняя сводка", callback_data="toggle_evening_summary")],
-        [InlineKeyboardButton(text="🗑 Забудь всё", callback_data="settings_forget")],
-        [InlineKeyboardButton(text="◀️ Назад", callback_data="menu_back")],
-    ])
-
-def kb_back(callback: str = "menu_back"):
-    return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="◀️ Назад", callback_data=callback)]
-    ])
-
-def kb_recipe_actions(recipe_id: int = 0, from_chat: bool = False):
-    save_cb = f"recipe_save_{recipe_id}" if recipe_id else "recipe_save_chat"
-    skip_cb = "recipe_skip"
-    return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="💾 Сохранить", callback_data=save_cb),
-         InlineKeyboardButton(text="❌ Не нужно", callback_data=skip_cb)],
-    ])
-
-# ─── AI Helper ─────────────────────────────────────────────────────────────────
-async def ai_chat(user_id: int, user_message: str, system_extra: str = "") -> str:
-    user = await get_user(user_id)
-    style_map = {
-        "girlfriend": "Ты — Cофия, лучшая подруга пользователя. Общаешься тепло, по-дружески, с заботой.",
-        "mentor":     "Ты — София, мудрый наставник. Даёшь взвешенные советы, поддерживаешь развитие.",
-        "pro":        "Ты — София, профессиональный ассистент. Чёткие, структурированные ответы.",
-    }
-    style_prompt = style_map.get(user["style"] if user else "girlfriend", style_map["girlfriend"])
-
-    # Load memories
-    memories = await db.fetch(
-        "SELECT memory_text FROM user_memory WHERE user_id=$1 ORDER BY created_at DESC LIMIT 10",
-        user_id
-    )
-    mem_str = "\n".join(m["memory_text"] for m in memories) if memories else "пока нет"
-
-    system_prompt = f"""{style_prompt}
-
-ВАЖНЫЕ ПРАВИЛА:
-- Никогда не используй звёздочки (*) и Markdown разметку в ответах
-- Пиши обычным текстом без форматирования
-- Ты помнишь всё что пользователь тебе рассказывал
-- Всегда подтверждай напоминания с точным временем
-- Если слышишь "каждый [день недели] в [время]" — предложи добавить в планер
-- Отвечай на языке: {user['language'] if user else 'ru'}
-
-Что ты знаешь о пользователе:
-{mem_str}
-
-{system_extra}"""
-
-    # Load recent conversation
-    history_rows = await db.fetch(
-        "SELECT role, content FROM conversation_history WHERE user_id=$1 ORDER BY created_at DESC LIMIT 20",
-        user_id
-    )
-    messages = [{"role": "system", "content": system_prompt}]
-    for row in reversed(history_rows):
-        messages.append({"role": row["role"], "content": row["content"]})
-    messages.append({"role": "user", "content": user_message})
-
-    try:
-        async with aiohttp.ClientSession() as session:
-            async with session.post(
-                f"{OPENAI_BASE}chat/completions",
-                headers={"Authorization": f"Bearer {OPENAI_KEY}", "Content-Type": "application/json"},
-                json={"model": MODEL, "messages": messages, "max_tokens": 1000, "temperature": 0.7},
-                timeout=aiohttp.ClientTimeout(total=30)
-            ) as resp:
-                data = await resp.json()
-                reply = data["choices"][0]["message"]["content"].strip()
-                # Strip markdown
-                reply = reply.replace("**", "").replace("*", "").replace("__", "").replace("`", "")
-    except Exception as e:
-        log.error(f"AI error: {e}")
-        reply = "Прости, что-то пошло не так. Попробуй ещё раз!"
-
-    # Save to history
-    await db.execute(
-        "INSERT INTO conversation_history(user_id, role, content) VALUES($1,'user',$2)",
-        user_id, user_message
-    )
-    await db.execute(
-        "INSERT INTO conversation_history(user_id, role, content) VALUES($1,'assistant',$2)",
-        user_id, reply
-    )
-
-    # Auto-extract memory
-    await auto_save_memory(user_id, user_message)
-
-    # Check for planner suggestion
-    await maybe_suggest_planner(user_id, user_message)
-
-    return reply
-
-async def auto_save_memory(user_id: int, text: str):
-    keywords = ["меня зовут", "я люблю", "я работаю", "мой город", "у меня есть",
-                "я живу", "я учусь", "мне нравится", "я не люблю", "моя семья"]
-    text_lower = text.lower()
-    if any(kw in text_lower for kw in keywords):
-        await db.execute(
-            "INSERT INTO user_memory(user_id, memory_text) VALUES($1,$2)",
-            user_id, text[:200]
-        )
-
-async def maybe_suggest_planner(user_id: int, text: str):
-    days = ["понедельник", "вторник", "среда", "четверг", "пятница", "суббота", "воскресенье",
-            "пн", "вт", "ср", "чт", "пт", "сб", "вс",
-            "monday", "tuesday", "wednesday", "thursday", "friday", "saturday", "sunday"]
-    text_lower = text.lower()
-    has_day = any(d in text_lower for d in days)
-    has_time = ":" in text or any(w in text_lower for w in ["в ", "утром", "вечером", "в час", "часов"])
-    has_repeat = any(w in text_lower for w in ["каждый", "каждую", "каждое", "every", "еженедельно"])
-    if has_day and has_time and has_repeat:
-        kb = InlineKeyboardMarkup(inline_keyboard=[
-            [InlineKeyboardButton(text="📅 Добавить в планер", callback_data=f"planner_quick_add"),
-             InlineKeyboardButton(text="Нет, спасибо", callback_data="planner_skip")]
-        ])
-        await bot.send_message(user_id, "Заметила, что ты говоришь о регулярном занятии. Добавить это в планер?", reply_markup=kb)
-
-# ─── Weather ───────────────────────────────────────────────────────────────────
-async def get_weather(city: str, mode: str = "now") -> str:
-    try:
-        async with aiohttp.ClientSession() as session:
-            url = f"https://api.openweathermap.org/data/2.5/weather?q={city}&appid={WEATHER_KEY}&units=metric&lang=ru"
-            if mode in ("hourly", "week"):
-                url = f"https://api.openweathermap.org/data/2.5/forecast?q={city}&appid={WEATHER_KEY}&units=metric&lang=ru&cnt=40"
-            async with session.get(url, timeout=aiohttp.ClientTimeout(total=10)) as resp:
-                data = await resp.json()
-
-        if mode == "now":
-            temp = round(data["main"]["temp"])
-            feels = round(data["main"]["feels_like"])
-            desc = data["weather"][0]["description"]
-            wind = data["wind"]["speed"]
-            return f"Погода в {city}: {temp}°C, ощущается как {feels}°C\n{desc.capitalize()}\nВетер: {wind} м/с"
-
-        elif mode == "hourly":
-            lines = [f"Погода по часам в {city}:"]
-            for item in data["list"][:8]:
-                t = datetime.fromtimestamp(item["dt"]).strftime("%H:%M")
-                temp = round(item["main"]["temp"])
-                desc = item["weather"][0]["description"]
-                lines.append(f"{t} — {temp}°C, {desc}")
-            return "\n".join(lines)
-
-        elif mode == "week":
-            lines = [f"Прогноз на неделю для {city}:"]
-            seen_days = set()
-            for item in data["list"]:
-                day = datetime.fromtimestamp(item["dt"]).strftime("%d.%m %A")
-                if day not in seen_days and len(seen_days) < 7:
-                    seen_days.add(day)
-                    temp = round(item["main"]["temp"])
-                    desc = item["weather"][0]["description"]
-                    lines.append(f"{day}: {temp}°C, {desc}")
-            return "\n".join(lines)
-
-    except Exception as e:
-        log.error(f"Weather error: {e}")
-        return f"Не могу получить погоду для {city}. Проверь название города."
-
-# ─── News ──────────────────────────────────────────────────────────────────────
-async def get_news(query: str = "технологии", lang: str = "ru") -> list:
-    try:
-        async with aiohttp.ClientSession() as session:
-            url = f"https://newsapi.org/v2/everything?q={query}&language={lang}&pageSize=5&apiKey={NEWS_KEY}"
-            async with session.get(url, timeout=aiohttp.ClientTimeout(total=10)) as resp:
-                data = await resp.json()
-        articles = data.get("articles", [])
-        return [{"title": a["title"], "url": a["url"], "source": a.get("source", {}).get("name", "")} for a in articles[:5]]
-    except Exception as e:
-        log.error(f"News error: {e}")
-        return []
-
-# ─── Interesting content ───────────────────────────────────────────────────────
-INTERESTING_CATEGORIES = {
-    "science":  ("Наука", "https://ru.wikipedia.org/wiki/Special:Random"),
-    "history":  ("История", "https://ru.wikipedia.org/wiki/Special:Random"),
-    "tech":     ("Технологии", "новости технологий"),
-    "facts":    ("Интересные факты", "случайный интересный факт"),
+MOTIVATIONAL_QUOTES = {
+    "ru": [
+        "Каждый день — это новая возможность стать лучше.",
+        "Маленькие шаги каждый день приводят к большим результатам.",
+        "Вы способны на большее, чем думаете.",
+        "Успех — это сумма небольших усилий, повторяемых день за днём.",
+        "Верьте в себя и всё станет возможным.",
+        "Сегодня — лучший день чтобы начать.",
+        "Ваши мечты заслуживают вашего труда.",
+        "Каждая трудность — это возможность для роста.",
+        "Действуйте сейчас, совершенствуйтесь потом.",
+        "Вы сильнее, чем вы думаете.",
+    ],
+    "en": [
+        "Every day is a new opportunity to be better.",
+        "Small steps every day lead to big results.",
+        "You are capable of more than you think.",
+        "Success is the sum of small efforts repeated day after day.",
+        "Believe in yourself and everything becomes possible.",
+        "Today is the best day to start.",
+        "Your dreams deserve your effort.",
+        "Every challenge is an opportunity to grow.",
+        "Act now, improve later.",
+        "You are stronger than you think.",
+    ]
 }
 
-async def get_interesting_article(category: str = "facts") -> str:
-    prompts = {
-        "science": "Расскажи один интересный научный факт или открытие (3-4 предложения, без звёздочек)",
-        "history": "Расскажи один интересный исторический факт или событие (3-4 предложения, без звёздочек)",
-        "tech":    "Расскажи об одной интересной технологии или гаджете (3-4 предложения, без звёздочек)",
-        "facts":   "Расскажи один удивительный факт о мире (3-4 предложения, без звёздочек)",
-        "travel":  "Расскажи об одном необычном месте на Земле (3-4 предложения, без звёздочек)",
+TEXTS = {
+    "ru": {
+        "welcome": "Добрый день!\n\nРада познакомиться! Я София — ваш личный ассистент. Помогу с планами, целями и важными делами.\n\nДавайте начнём — как вас зовут?",
+        "ask_city": "Очень приятно, {name}!\n\nВ каком городе вы находитесь?\n\nНапример: Москва, Алматы, Дубай",
+        "ask_language": "Запомнила — {city}\n\nНа каком языке вам удобнее общаться?",
+        "ask_morning": "Хотите чтобы я каждое утро присылала план дня?",
+        "ask_morning_time": "В какое время присылать утренний план?",
+        "ask_reminders": "Напоминать о делах заранее?",
+        "ask_evening_news": "Хотите получать вечернюю сводку новостей — главные события дня и полезные советы на вечер?",
+        "ask_evening_time": "В какое время присылать вечернюю сводку новостей?",
+        "ask_comm_style": "Как вам удобнее чтобы я общалась с вами?",
+        "finish": "Всё готово, {name}! 🌸\n\nЯ запомнила ваши настройки. Напишите /menu чтобы открыть меню.",
+        "menu_title": "Меню Софии\n\nЗдравствуйте, {name}! Чем могу помочь?",
+        "not_started": "Напишите /start чтобы начать",
+        "error": "Что-то пошло не так, попробуйте ещё раз.",
+        "water": "{name}, самое время выпить стакан воды! 💧",
+        "reminder": "{name}, напоминаю!\n\n{text}",
+        "morning": "Доброе утро, {name}!\n\n",
+        "no_plan": "На сегодня задачи не добавлены. Напишите мне что планируете — составлю расписание.",
+        "history_cleared": "История очищена",
+        "memory_cleared": "Я всё забыла о вас. Можем начать с чистого листа — напишите /start",
+    },
+    "en": {
+        "welcome": "Good day!\n\nNice to meet you! I'm Sofia — your personal assistant. I'll help with plans, goals and important tasks.\n\nLet's start — what's your name?",
+        "ask_city": "Nice to meet you, {name}!\n\nWhat city are you in?\n\nFor example: London, New York, Dubai",
+        "ask_language": "Got it — {city}\n\nWhat language would you prefer?",
+        "ask_morning": "Would you like me to send you a daily plan every morning?",
+        "ask_morning_time": "What time should I send the morning plan?",
+        "ask_reminders": "Remind you about tasks in advance?",
+        "ask_evening_news": "Would you like to receive an evening summary — a brief recap of the day and useful tips?",
+        "ask_evening_time": "What time should I send the evening summary?",
+        "ask_comm_style": "How would you like me to communicate with you?",
+        "finish": "All done, {name}! 🌸\n\nI've saved your settings. Type /menu to open the menu.",
+        "menu_title": "Sofia's Menu\n\nHello, {name}! How can I help?",
+        "not_started": "Type /start to begin",
+        "error": "Something went wrong, please try again.",
+        "water": "{name}, time to drink a glass of water! 💧",
+        "reminder": "{name}, reminder!\n\n{text}",
+        "morning": "Good morning, {name}!\n\n",
+        "no_plan": "No tasks added for today. Tell me what you're planning — I'll create a schedule.",
+        "history_cleared": "History cleared",
+        "memory_cleared": "I've forgotten everything about you. We can start fresh — type /start",
     }
-    # Use random seed to get different content each time
-    seed = random.randint(1, 10000)
-    prompt = prompts.get(category, prompts["facts"]) + f" (вариант #{seed})"
+}
+
+def t(lang, key, **kwargs):
+    text = TEXTS.get(lang, TEXTS["ru"]).get(key, TEXTS["ru"].get(key, ""))
+    return text.format(**kwargs) if kwargs else text
+
+def get_current_datetime(timezone_str="Europe/Moscow"):
     try:
-        async with aiohttp.ClientSession() as session:
-            async with session.post(
-                f"{OPENAI_BASE}chat/completions",
-                headers={"Authorization": f"Bearer {OPENAI_KEY}", "Content-Type": "application/json"},
-                json={"model": MODEL, "messages": [{"role": "user", "content": prompt}],
-                      "max_tokens": 300, "temperature": 1.0},
-                timeout=aiohttp.ClientTimeout(total=20)
-            ) as resp:
-                data = await resp.json()
-                text = data["choices"][0]["message"]["content"].strip()
-                return text.replace("**", "").replace("*", "").replace("`", "")
-    except Exception as e:
-        log.error(f"Interesting error: {e}")
-        return "Не удалось загрузить статью. Попробуй ещё раз!"
+        tz = pytz.timezone(timezone_str)
+        now = datetime.now(tz)
+        months_ru = ["января","февраля","марта","апреля","мая","июня","июля","августа","сентября","октября","ноября","декабря"]
+        days_ru = ["понедельник","вторник","среда","четверг","пятница","суббота","воскресенье"]
+        return {
+            "ru": f"{now.day} {months_ru[now.month-1]} {now.year} года, {days_ru[now.weekday()]}, {now.strftime('%H:%M')}",
+            "en": now.strftime("%B %d, %Y, %A, %H:%M"),
+        }
+    except:
+        now = datetime.now()
+        return {"ru": now.strftime("%d.%m.%Y %H:%M"), "en": now.strftime("%B %d, %Y %H:%M")}
 
-# ─── Image Generation ──────────────────────────────────────────────────────────
-async def generate_image(prompt: str) -> Optional[bytes]:
-    try:
-        async with aiohttp.ClientSession() as session:
-            async with session.post(
-                f"{OPENAI_BASE}images/generations",
-                headers={"Authorization": f"Bearer {OPENAI_KEY}", "Content-Type": "application/json"},
-                json={"model": IMAGE_MODEL, "prompt": prompt, "n": 1,
-                      "size": "1024x1024", "response_format": "b64_json"},
-                timeout=aiohttp.ClientTimeout(total=60)
-            ) as resp:
-                data = await resp.json()
-                b64 = data["data"][0]["b64_json"]
-                return base64.b64decode(b64)
-    except Exception as e:
-        log.error(f"Image gen error: {e}")
-        return None
+CITY_PREPOSITIONS = {
+    "москва": "Москве", "санкт-петербург": "Санкт-Петербурге", "петербург": "Петербурге",
+    "новосибирск": "Новосибирске", "екатеринбург": "Екатеринбурге", "казань": "Казани",
+    "нижний новгород": "Нижнем Новгороде", "челябинск": "Челябинске", "самара": "Самаре",
+    "омск": "Омске", "ростов-на-дону": "Ростове-на-Дону", "уфа": "Уфе",
+    "красноярск": "Красноярске", "пермь": "Перми", "воронеж": "Воронеже",
+    "волгоград": "Волгограде", "краснодар": "Краснодаре", "саратов": "Саратове",
+    "тюмень": "Тюмени", "тольятти": "Тольятти", "ижевск": "Ижевске",
+    "барнаул": "Барнауле", "ульяновск": "Ульяновске", "иркутск": "Иркутске",
+    "хабаровск": "Хабаровске", "ярославль": "Ярославле", "владивосток": "Владивостоке",
+    "дубай": "Дубае", "алматы": "Алматы", "ташкент": "Ташкенте",
+    "минск": "Минске", "баку": "Баку", "ереван": "Ереване", "тбилиси": "Тбилиси",
+    "лондон": "Лондоне", "париж": "Париже", "берлин": "Берлине", "нью-йорк": "Нью-Йорке",
+}
 
-# ─── Voice ─────────────────────────────────────────────────────────────────────
-async def transcribe_voice(file_bytes: bytes) -> str:
-    try:
-        async with aiohttp.ClientSession() as session:
-            # Upload
-            async with session.post(
-                "https://api.assemblyai.com/v2/upload",
-                headers={"authorization": ASSEMBLY_KEY},
-                data=file_bytes,
-                timeout=aiohttp.ClientTimeout(total=30)
-            ) as resp:
-                upload_url = (await resp.json())["upload_url"]
-            # Transcribe
-            async with session.post(
-                "https://api.assemblyai.com/v2/transcript",
-                headers={"authorization": ASSEMBLY_KEY, "content-type": "application/json"},
-                json={"audio_url": upload_url, "language_code": "ru"},
-                timeout=aiohttp.ClientTimeout(total=10)
-            ) as resp:
-                transcript_id = (await resp.json())["id"]
-            # Poll
-            for _ in range(30):
-                await asyncio.sleep(3)
-                async with session.get(
-                    f"https://api.assemblyai.com/v2/transcript/{transcript_id}",
-                    headers={"authorization": ASSEMBLY_KEY},
-                    timeout=aiohttp.ClientTimeout(total=10)
-                ) as resp:
-                    result = await resp.json()
-                    if result["status"] == "completed":
-                        return result.get("text", "")
-                    elif result["status"] == "error":
-                        return ""
-    except Exception as e:
-        log.error(f"Voice error: {e}")
-        return ""
+def city_in_form(city):
+    key = city.lower().strip()
+    if key in CITY_PREPOSITIONS:
+        return CITY_PREPOSITIONS[key]
+    if key.endswith("ск") or key.endswith("вск"):
+        return city + "е"
+    if key.endswith("ль"):
+        return city[:-1] + "е"
+    if key.endswith("ов") or key.endswith("ев"):
+        return city + "е"
+    if key.endswith("а"):
+        return city[:-1] + "е"
+    if key.endswith("я"):
+        return city[:-1] + "е"
+    return city
 
-# ─── Reminders (DB-backed, survive deploys) ────────────────────────────────────
-reminder_tasks = {}
+SYSTEM_PROMPT_RU = """Ты — София, личный ассистент и наставник.
 
-async def restore_reminders():
-    """Called on startup — restores all active reminders from DB."""
-    rows = await db.fetch(
-        "SELECT * FROM reminders WHERE is_active=TRUE AND remind_at > NOW()",
-    )
-    count = 0
-    for row in rows:
-        task = asyncio.create_task(reminder_worker(row["id"], row["user_id"], row["text"], row["remind_at"], row["repeat_rule"]))
-        reminder_tasks[row["id"]] = task
-        count += 1
-    log.info(f"Restored {count} reminders")
+СТИЛЬ ОБЩЕНИЯ — СТРОГО соблюдай стиль из профиля:
+подружка → ОБЯЗАТЕЛЬНО на ты, тепло, неформально, как близкая подруга, можно с юмором. НИКОГДА не говори "вы" при этом стиле!
+наставник → на вы, мотивирующе, поддерживающе, вдохновляюще
+профессионал → на вы, чётко, коротко, без лишних слов и эмодзи
 
-async def reminder_worker(reminder_id: int, user_id: int, text: str, remind_at: datetime, repeat_rule: Optional[str]):
-    now = datetime.now()
-    wait_secs = (remind_at - now).total_seconds()
-    if wait_secs > 0:
-        await asyncio.sleep(wait_secs)
-    # Check still active
-    row = await db.fetchrow("SELECT is_active FROM reminders WHERE id=$1", reminder_id)
-    if not row or not row["is_active"]:
+ФОРМАТИРОВАНИЕ:
+Пиши как живой человек в мессенджере. Никаких # заголовков. Никаких --- разделителей. Никаких маркеров * или - в начале строк. Жирный (*слово*) только для самого важного, редко. Курсив (_слово_) иногда. Эмодзи умеренно. Короткие абзацы. Один вопрос за раз.
+
+ДАТА И ВРЕМЯ:
+Текущая дата и время указаны в начале сообщения. Ты ВСЕГДА знаешь дату и время. Никогда не говори что не знаешь.
+
+ПАМЯТЬ:
+Помнишь всё что пользователь говорил. Используй естественно. Никогда не говори "я не помню".
+
+О СОЗДАТЕЛЕ — дозированно:
+"кто создал" → "Меня создала Ирина Солодкова 🌸"
+"расскажи больше" → "Ирине 17 лет, она из Волгограда, сейчас живёт и учится в Дубае. Увлекается ИИ и бизнесом."
+"контакты" → "irinasa_00@mail.ru"
+
+ЧТО УМЕЕШЬ: планирование, напоминания, поддержка, нутрициология, цели, любые вопросы.
+
+Формат плана (только когда просят):
+09:00 — задача
+10:00 — задача"""
+
+SYSTEM_PROMPT_EN = """You are Sofia, a personal assistant and mentor.
+
+COMMUNICATION STYLE — STRICTLY follow the style from the profile:
+friend → MUST use casual/informal tone, warm, like a close friend, can be humorous — NEVER use formal tone with this style!
+mentor → formal tone, motivating, supportive, inspiring
+professional → formal, clear, brief, no unnecessary words or emojis
+
+FORMATTING:
+Write like a real person in a messenger. No # headers. No --- separators. No * or - list markers. Bold (*word*) rarely. Italics (_word_) occasionally. Emojis in moderation. Short paragraphs. One question at a time.
+
+DATE AND TIME:
+Current date and time are at the start of each message. You ALWAYS know the date and time.
+
+MEMORY:
+Remember everything the user said. Use naturally. Never say "I don't remember".
+
+ABOUT CREATOR — gradually:
+"who created you" → "I was created by Irina Solodkova 🌸"
+"tell me more" → "Irina is 17, from Volgograd, lives and studies in Dubai. Passionate about AI and business."
+"contact" → "irinasa_00@mail.ru"
+
+WHAT YOU CAN DO: planning, reminders, support, nutrition, goals, any questions.
+
+Plan format (only when asked):
+09:00 — task
+10:00 — task"""
+
+SKILLS_RU = """Вот что я умею 🌸
+
+Обучаюсь под вас — запоминаю предпочтения, привычки и цели.
+
+Планирование — план на день, неделю или месяц.
+
+Голосовые сообщения — говорите вслух, пойму и отвечу.
+
+Анализ фото — пришлите фото, опишу или отвечу на вопрос.
+
+Генерация изображений — напишите "нарисуй..." и я создам картинку.
+
+Новости — свежие новости по вашему запросу.
+
+Два языка — русский и английский 🇷🇺 🇬🇧
+
+Умные напоминания, утренний план, погода по часам и на неделю.
+
+Трекер привычек, сна, воды, финансов.
+
+Список покупок, заметки, рецепты, фильмы.
+
+Психологическая поддержка и советы нутрициолога.
+
+Напишите /menu чтобы открыть меню 🌸"""
+
+SKILLS_EN = """Here's what I can do 🌸
+
+I learn from you — remember preferences, habits and goals.
+
+Planning — plans for day, week or month.
+
+Voice messages — speak out loud, I'll understand.
+
+Photo analysis — send a photo, I'll describe it or answer questions.
+
+Image generation — write "draw..." and I'll create an image.
+
+News — fresh news on your request.
+
+Two languages — Russian and English 🇷🇺 🇬🇧
+
+Smart reminders, morning plan, hourly and weekly weather.
+
+Habit, sleep, water, finance trackers.
+
+Shopping list, notes, recipes, movies.
+
+Psychological support and nutrition advice.
+
+Type /menu to open the menu 🌸"""
+
+db_pool = None
+
+async def init_db():
+    global db_pool
+    db_pool = await asyncpg.create_pool(DATABASE_URL)
+    async with db_pool.acquire() as conn:
+        await conn.execute("""
+            CREATE TABLE IF NOT EXISTS users (
+                user_id BIGINT PRIMARY KEY,
+                name TEXT,
+                username TEXT,
+                timezone TEXT DEFAULT 'Europe/Moscow',
+                morning_plan BOOLEAN DEFAULT FALSE,
+                morning_time TEXT DEFAULT '08:00',
+                reminder_before INTEGER DEFAULT 60,
+                onboarded BOOLEAN DEFAULT FALSE,
+                created_at TIMESTAMP DEFAULT NOW(),
+                city TEXT DEFAULT 'Москва',
+                water_reminders BOOLEAN DEFAULT FALSE,
+                water_interval INTEGER DEFAULT 2,
+                morning_weather BOOLEAN DEFAULT FALSE,
+                morning_motivation BOOLEAN DEFAULT FALSE,
+                language TEXT DEFAULT 'ru',
+                evening_news BOOLEAN DEFAULT FALSE,
+                evening_time TEXT DEFAULT '21:00',
+                comm_style TEXT DEFAULT 'наставник'
+            )
+        """)
+        for table in [
+            """CREATE TABLE IF NOT EXISTS reminders (id SERIAL PRIMARY KEY, user_id BIGINT, time_str TEXT, text TEXT, created_at TIMESTAMP DEFAULT NOW())""",
+            """CREATE TABLE IF NOT EXISTS history (id SERIAL PRIMARY KEY, user_id BIGINT, role TEXT, content TEXT, created_at TIMESTAMP DEFAULT NOW())""",
+            """CREATE TABLE IF NOT EXISTS habits (id SERIAL PRIMARY KEY, user_id BIGINT, name TEXT, created_at TIMESTAMP DEFAULT NOW())""",
+            """CREATE TABLE IF NOT EXISTS habit_logs (id SERIAL PRIMARY KEY, user_id BIGINT, habit_id INTEGER, logged_at TIMESTAMP DEFAULT NOW())""",
+            """CREATE TABLE IF NOT EXISTS finances (id SERIAL PRIMARY KEY, user_id BIGINT, amount FLOAT, type TEXT, category TEXT, description TEXT, created_at TIMESTAMP DEFAULT NOW())""",
+            """CREATE TABLE IF NOT EXISTS sleep_logs (id SERIAL PRIMARY KEY, user_id BIGINT, bedtime TEXT, wake_time TEXT, created_at TIMESTAMP DEFAULT NOW())""",
+            """CREATE TABLE IF NOT EXISTS notes (id SERIAL PRIMARY KEY, user_id BIGINT, text TEXT, created_at TIMESTAMP DEFAULT NOW())""",
+            """CREATE TABLE IF NOT EXISTS user_memory (id SERIAL PRIMARY KEY, user_id BIGINT, key TEXT, value TEXT, updated_at TIMESTAMP DEFAULT NOW())""",
+            """CREATE TABLE IF NOT EXISTS shopping_list (id SERIAL PRIMARY KEY, user_id BIGINT, item TEXT, done BOOLEAN DEFAULT FALSE, created_at TIMESTAMP DEFAULT NOW())""",
+        ]:
+            await conn.execute(table)
+        for col, definition in [
+            ("city", "TEXT DEFAULT 'Москва'"), ("water_reminders", "BOOLEAN DEFAULT FALSE"),
+            ("water_interval", "INTEGER DEFAULT 2"), ("morning_weather", "BOOLEAN DEFAULT FALSE"),
+            ("morning_motivation", "BOOLEAN DEFAULT FALSE"), ("language", "TEXT DEFAULT 'ru'"),
+            ("evening_news", "BOOLEAN DEFAULT FALSE"), ("evening_time", "TEXT DEFAULT '21:00'"),
+            ("comm_style", "TEXT DEFAULT 'наставник'"),
+        ]:
+            try:
+                await conn.execute(f"ALTER TABLE users ADD COLUMN IF NOT EXISTS {col} {definition}")
+            except:
+                pass
+
+async def get_user(user_id):
+    async with db_pool.acquire() as conn:
+        return await conn.fetchrow("SELECT * FROM users WHERE user_id = $1", user_id)
+
+async def save_user(user_id, **kwargs):
+    async with db_pool.acquire() as conn:
+        user = await conn.fetchrow("SELECT user_id FROM users WHERE user_id = $1", user_id)
+        if user:
+            sets = ", ".join([f"{k} = ${i+2}" for i, k in enumerate(kwargs.keys())])
+            await conn.execute(f"UPDATE users SET {sets} WHERE user_id = $1", user_id, *kwargs.values())
+        else:
+            await conn.execute("INSERT INTO users (user_id) VALUES ($1)", user_id)
+            if kwargs:
+                sets = ", ".join([f"{k} = ${i+2}" for i, k in enumerate(kwargs.keys())])
+                await conn.execute(f"UPDATE users SET {sets} WHERE user_id = $1", user_id, *kwargs.values())
+
+async def get_user_memory(user_id):
+    async with db_pool.acquire() as conn:
+        rows = await conn.fetch("SELECT key, value FROM user_memory WHERE user_id = $1 ORDER BY updated_at DESC LIMIT 30", user_id)
+        if not rows:
+            return ""
+        return "\n".join([f"{r['key']}: {r['value']}" for r in rows])
+
+async def save_memory_item(user_id, key, value):
+    async with db_pool.acquire() as conn:
+        existing = await conn.fetchrow("SELECT id FROM user_memory WHERE user_id = $1 AND key = $2", user_id, key)
+        if existing:
+            await conn.execute("UPDATE user_memory SET value = $1, updated_at = NOW() WHERE user_id = $2 AND key = $3", value, user_id, key)
+        else:
+            await conn.execute("INSERT INTO user_memory (user_id, key, value) VALUES ($1, $2, $3)", user_id, key, value)
+
+async def extract_and_save_memory(user_id, user_text, lang):
+    personal_keywords_ru = ["меня зовут", "мой ", "моя ", "моё ", "мои ", "я работаю", "я живу", "я учусь", "ребёнок", "дети", "муж", "жена", "день рождения", "люблю", "не люблю", "аллергия"]
+    personal_keywords_en = ["my name", "my ", "i work", "i live", "i study", "my child", "husband", "wife", "birthday", "i love", "i hate", "allergy"]
+    text_lower = user_text.lower()
+    has_personal = any(k in text_lower for k in (personal_keywords_ru if lang == "ru" else personal_keywords_en))
+    if not has_personal or len(user_text) < 10:
         return
-    await bot.send_message(user_id, f"Напоминание: {text}")
-    if repeat_rule:
-        # weekly: добавляем 7 дней и создаём новое напоминание
-        if repeat_rule == "weekly":
-            new_time = remind_at + timedelta(weeks=1)
-            new_id = await db.fetchval(
-                "INSERT INTO reminders(user_id, text, remind_at, repeat_rule) VALUES($1,$2,$3,$4) RETURNING id",
-                user_id, text, new_time, repeat_rule
-            )
-            task = asyncio.create_task(reminder_worker(new_id, user_id, text, new_time, repeat_rule))
-            reminder_tasks[new_id] = task
-        elif repeat_rule == "daily":
-            new_time = remind_at + timedelta(days=1)
-            new_id = await db.fetchval(
-                "INSERT INTO reminders(user_id, text, remind_at, repeat_rule) VALUES($1,$2,$3,$4) RETURNING id",
-                user_id, text, new_time, repeat_rule
-            )
-            task = asyncio.create_task(reminder_worker(new_id, user_id, text, new_time, repeat_rule))
-            reminder_tasks[new_id] = task
-    await db.execute("UPDATE reminders SET is_active=FALSE WHERE id=$1", reminder_id)
-
-async def schedule_reminder(user_id: int, text: str, remind_at: datetime, repeat_rule: Optional[str] = None) -> int:
-    rid = await db.fetchval(
-        "INSERT INTO reminders(user_id, text, remind_at, repeat_rule) VALUES($1,$2,$3,$4) RETURNING id",
-        user_id, text, remind_at, repeat_rule
-    )
-    task = asyncio.create_task(reminder_worker(rid, user_id, text, remind_at, repeat_rule))
-    reminder_tasks[rid] = task
-    return rid
-
-async def parse_reminder_time(text: str) -> Optional[datetime]:
-    """AI-powered time parsing."""
-    now = datetime.now()
     try:
-        async with aiohttp.ClientSession() as session:
-            async with session.post(
-                f"{OPENAI_BASE}chat/completions",
-                headers={"Authorization": f"Bearer {OPENAI_KEY}", "Content-Type": "application/json"},
-                json={
-                    "model": MODEL,
-                    "messages": [{
-                        "role": "user",
-                        "content": f"Сейчас: {now.strftime('%Y-%m-%d %H:%M')}. Извлеки дату и время из текста: '{text}'. Ответь ТОЛЬКО в формате YYYY-MM-DD HH:MM. Если не можешь — ответь NONE."
-                    }],
-                    "max_tokens": 30, "temperature": 0
-                },
-                timeout=aiohttp.ClientTimeout(total=10)
-            ) as resp:
-                data = await resp.json()
-                result = data["choices"][0]["message"]["content"].strip()
-                if result == "NONE":
-                    return None
-                return datetime.strptime(result, "%Y-%m-%d %H:%M")
+        system = """Извлекай ТОЛЬКО конкретные личные факты: имена близких, город, работу, цели, предпочтения еды, важные даты, здоровье.
+НЕ извлекай вопросы, команды, общие фразы.
+ТОЛЬКО валидный JSON: {"ключ": "значение"} или {}""" if lang == "ru" else """Extract ONLY specific personal facts: names, city, work, goals, food preferences, important dates, health.
+Do NOT extract questions, commands, general phrases.
+ONLY valid JSON: {"key": "value"} or {}"""
+        response = ai_client.chat.completions.create(
+            model="gpt-4o-mini",
+            messages=[{"role": "system", "content": system}, {"role": "user", "content": user_text}],
+            max_tokens=150, temperature=0.1
+        )
+        result = response.choices[0].message.content.strip().replace("```json", "").replace("```", "").strip()
+        if result == "{}" or not result:
+            return
+        data = json.loads(result)
+        for key, value in data.items():
+            if value and isinstance(value, str) and len(value) > 0:
+                await save_memory_item(user_id, key, value)
+    except:
+        pass
+
+async def get_history_db(user_id, limit=25):
+    async with db_pool.acquire() as conn:
+        rows = await conn.fetch(
+            "SELECT role, content FROM history WHERE user_id = $1 AND role != 'system' ORDER BY created_at DESC LIMIT $2",
+            user_id, limit
+        )
+        return [{"role": r["role"], "content": r["content"]} for r in reversed(rows)]
+
+async def add_history(user_id, role, content):
+    async with db_pool.acquire() as conn:
+        await conn.execute("INSERT INTO history (user_id, role, content) VALUES ($1, $2, $3)", user_id, role, content)
+        await conn.execute("DELETE FROM history WHERE id IN (SELECT id FROM history WHERE user_id = $1 ORDER BY created_at DESC OFFSET 25)", user_id)
+
+async def get_reminders(user_id):
+    async with db_pool.acquire() as conn:
+        rows = await conn.fetch("SELECT time_str, text FROM reminders WHERE user_id = $1", user_id)
+        return [{"time": r["time_str"], "text": r["text"]} for r in rows]
+
+async def add_reminder(user_id, time_str, text):
+    async with db_pool.acquire() as conn:
+        await conn.execute("INSERT INTO reminders (user_id, time_str, text) VALUES ($1, $2, $3)", user_id, time_str, text)
+
+async def check_conflict_db(user_id, time_str):
+    async with db_pool.acquire() as conn:
+        row = await conn.fetchrow("SELECT text FROM reminders WHERE user_id = $1 AND time_str = $2", user_id, time_str)
+        return row["text"] if row else None
+
+async def get_all_users():
+    async with db_pool.acquire() as conn:
+        rows = await conn.fetch("SELECT user_id FROM users WHERE onboarded = TRUE")
+        return [r["user_id"] for r in rows]
+
+async def notify_admin(context, user_name, username, user_text, reply):
+    try:
+        await context.bot.send_message(
+            chat_id=ADMIN_ID,
+            text=f"👤 {user_name} @{username}:\n{user_text}\n\n🤖 София:\n{reply}"
+        )
+    except Exception as e:
+        logging.error(f"Ошибка notify_admin: {e}")
+
+async def get_timezone_by_city(city):
+    try:
+        async with httpx.AsyncClient(timeout=10) as http:
+            response = await http.get("https://api.openweathermap.org/data/2.5/weather", params={"q": city, "appid": WEATHER_API_KEY})
+        data = response.json()
+        if data.get("cod") != 200:
+            return "Europe/Moscow"
+        tz = tf.timezone_at(lat=data["coord"]["lat"], lng=data["coord"]["lon"])
+        return tz or "Europe/Moscow"
+    except:
+        return "Europe/Moscow"
+
+async def get_weather(city, lang="ru"):
+    try:
+        async with httpx.AsyncClient(timeout=10) as http:
+            response = await http.get("https://api.openweathermap.org/data/2.5/weather", params={"q": city, "appid": WEATHER_API_KEY, "units": "metric", "lang": lang})
+        data = response.json()
+        if data.get("cod") != 200:
+            city_form = city_in_form(city) if lang == "ru" else city
+            return f"Не удалось получить погоду для {city_form}." if lang == "ru" else f"Could not get weather for {city}."
+        temp = round(data["main"]["temp"])
+        feels = round(data["main"]["feels_like"])
+        desc = data["weather"][0]["description"]
+        humidity = data["main"]["humidity"]
+        wind = data["wind"]["speed"]
+        city_form = city_in_form(city) if lang == "ru" else city
+        if lang == "en":
+            advice = "🧥 Dress warmly!" if temp < 0 else "🧣 Take a jacket." if temp < 10 else "👕 Light jacket." if temp < 18 else "☀️ Perfect weather!"
+            if "rain" in desc: advice += " ☂️ Take an umbrella!"
+            return f"Weather in {city}:\n\n🌡 {temp}°C (feels like {feels}°C)\n{desc.capitalize()}\nHumidity: {humidity}%\nWind: {wind} m/s\n\n{advice}"
+        else:
+            advice = "🧥 Оденьтесь тепло!" if temp < 0 else "🧣 Возьмите куртку." if temp < 10 else "👕 Лёгкая куртка." if temp < 18 else "☀️ Отличная погода!"
+            if "дождь" in desc or "ливень" in desc: advice += " ☂️ Возьмите зонт!"
+            return f"Погода в {city_form}:\n\n🌡 {temp}°C (ощущается как {feels}°C)\n{desc.capitalize()}\nВлажность: {humidity}%\nВетер: {wind} м/с\n\n{advice}"
+    except Exception as e:
+        logging.error(f"Ошибка погоды: {e}")
+        return "Погода недоступна." if lang == "ru" else "Weather unavailable."
+
+async def get_weather_hourly(city, lang="ru"):
+    try:
+        async with httpx.AsyncClient(timeout=10) as http:
+            response = await http.get("https://api.openweathermap.org/data/2.5/forecast", params={"q": city, "appid": WEATHER_API_KEY, "units": "metric", "lang": lang, "cnt": 8})
+        data = response.json()
+        if data.get("cod") != "200":
+            return None
+        city_form = city_in_form(city) if lang == "ru" else city
+        lines = []
+        for item in data["list"][:8]:
+            dt = datetime.fromtimestamp(item["dt"])
+            hour = dt.strftime("%H:%M")
+            temp = round(item["main"]["temp"])
+            desc = item["weather"][0]["description"]
+            lines.append(f"{hour} — {temp}°C, {desc}")
+        title = f"Погода в {city_form} по часам:" if lang == "ru" else f"Hourly weather in {city}:"
+        return f"{title}\n\n" + "\n".join(lines)
     except:
         return None
 
-# ─── Pills daily reminder ──────────────────────────────────────────────────────
-async def pill_daily_checker():
-    """Runs every minute to check pill reminders."""
-    while True:
-        await asyncio.sleep(60)
-        now = datetime.now()
-        current_time = now.strftime("%H:%M")
-        try:
-            rows = await db.fetch(
-                "SELECT p.user_id, p.name, p.remind_time FROM pills p WHERE p.is_active=TRUE AND p.remind_time=$1",
-                current_time
-            )
-            for row in rows:
-                kb = InlineKeyboardMarkup(inline_keyboard=[
-                    [InlineKeyboardButton(text="✅ Принял(а)", callback_data=f"pill_taken_{row['name']}"),
-                     InlineKeyboardButton(text="⏰ Напомни позже", callback_data=f"pill_later_{row['name']}")]
-                ])
-                await bot.send_message(row["user_id"], f"Время принять таблетку: {row['name']}", reply_markup=kb)
-        except Exception as e:
-            log.error(f"Pill checker error: {e}")
+async def get_weather_forecast(city, lang="ru"):
+    try:
+        async with httpx.AsyncClient(timeout=10) as http:
+            response = await http.get("https://api.openweathermap.org/data/2.5/forecast", params={"q": city, "appid": WEATHER_API_KEY, "units": "metric", "lang": lang, "cnt": 40})
+        data = response.json()
+        if data.get("cod") != "200":
+            return None
+        city_form = city_in_form(city) if lang == "ru" else city
+        days = {}
+        for item in data["list"]:
+            date = item["dt_txt"][:10]
+            if date not in days:
+                days[date] = {"temps": [], "desc": item["weather"][0]["description"]}
+            days[date]["temps"].append(item["main"]["temp"])
+        result = []
+        months_ru = ["янв","фев","мар","апр","мая","июн","июл","авг","сен","окт","ноя","дек"]
+        for date, info in list(days.items())[:7]:
+            dt = datetime.strptime(date, "%Y-%m-%d")
+            date_str = f"{dt.day} {months_ru[dt.month-1]}" if lang == "ru" else dt.strftime("%b %d")
+            result.append(f"{date_str}: {round(min(info['temps']))}°C — {round(max(info['temps']))}°C, {info['desc']}")
+        title = f"Прогноз погоды в {city_form}:" if lang == "ru" else f"Weather forecast for {city}:"
+        return f"{title}\n\n" + "\n".join(result)
+    except:
+        return None
 
-# ─── Morning routine ───────────────────────────────────────────────────────────
-async def morning_routine():
-    """Sends morning greeting at 8:00."""
-    while True:
-        now = datetime.now()
-        next_8 = now.replace(hour=8, minute=0, second=0, microsecond=0)
-        if now >= next_8:
-            next_8 += timedelta(days=1)
-        await asyncio.sleep((next_8 - now).total_seconds())
+INTERESTING_QUERIES = {
+    "science": {"query": "science discovery research breakthrough", "ru": "🔬 Научные открытия", "en": "🔬 Science Discoveries"},
+    "technology": {"query": "technology AI innovation future", "ru": "💻 Технологии и ИИ", "en": "💻 Technology & AI"},
+    "health": {"query": "health wellness longevity medicine", "ru": "💚 Здоровье и долголетие", "en": "💚 Health & Wellness"},
+    "inspiration": {"query": "inspiring success achievement positive story", "ru": "✨ Вдохновляющие истории", "en": "✨ Inspiring Stories"},
+}
 
-        users = await db.fetch("SELECT * FROM users WHERE morning_weather=TRUE OR morning_motivation=TRUE")
-        for user in users:
-            parts = [f"Доброе утро! Рада тебя видеть."]
-            if user["morning_weather"]:
-                weather = await get_weather(user["city"] or "Москва")
-                parts.append(weather)
-            if user["morning_motivation"]:
-                motivations = [
-                    "Сегодня отличный день, чтобы сделать что-то важное для себя.",
-                    "Ты справишься со всем, что запланировала. Верю в тебя!",
-                    "Каждый новый день — это новая возможность стать лучше.",
-                    "Улыбнись! Ты уже сделала большой шаг, проснувшись с хорошим настроем.",
-                ]
-                parts.append(random.choice(motivations))
-            await bot.send_message(user["user_id"], "\n\n".join(parts))
+async def fetch_articles(query, count=10):
+    if not NEWS_API_KEY:
+        return []
+    try:
+        params = {"apiKey": NEWS_API_KEY, "q": query, "language": "en", "pageSize": count, "sortBy": "publishedAt"}
+        async with httpx.AsyncClient(timeout=10) as http:
+            response = await http.get("https://newsapi.org/v2/everything", params=params)
+        data = response.json()
+        if data.get("status") != "ok" or not data.get("articles"):
+            return []
+        articles = []
+        for a in data["articles"]:
+            title = a.get("title", "").split(" - ")[0].strip()
+            desc = a.get("description") or ""
+            url = a.get("url") or ""
+            if title and title != "[Removed]" and len(title) > 10:
+                articles.append({"title": title, "description": desc, "url": url})
+        return articles[:count]
+    except Exception as e:
+        logging.error(f"Ошибка fetch_articles: {e}")
+        return []
 
-# ─── Evening summary ───────────────────────────────────────────────────────────
-async def evening_summary():
-    """Sends evening summary at 21:00."""
-    while True:
-        now = datetime.now()
-        next_21 = now.replace(hour=21, minute=0, second=0, microsecond=0)
-        if now >= next_21:
-            next_21 += timedelta(days=1)
-        await asyncio.sleep((next_21 - now).total_seconds())
+async def translate_titles(titles, lang="ru"):
+    if lang != "ru":
+        return titles
+    try:
+        text = "\n".join([f"{i+1}. {t}" for i, t in enumerate(titles)])
+        resp = ai_client.chat.completions.create(
+            model="gpt-4o-mini",
+            messages=[
+                {"role": "system", "content": "Переведи заголовки на русский. Отвечай ТОЛЬКО строками вида: 1. Заголовок"},
+                {"role": "user", "content": text}
+            ],
+            max_tokens=800, temperature=0.1
+        )
+        result = resp.choices[0].message.content.strip()
+        translated = []
+        for line in result.split("\n"):
+            line = line.strip()
+            if line and line[0].isdigit() and ". " in line:
+                translated.append(line.split(". ", 1)[1].strip())
+        return translated if len(translated) == len(titles) else titles
+    except:
+        return titles
 
-        users = await db.fetch("SELECT * FROM users WHERE evening_summary=TRUE")
-        for user in users:
-            uid = user["user_id"]
-            today = datetime.now().date()
+async def get_article_details(article, lang="ru"):
+    try:
+        title = article.get("title", "")
+        desc = article.get("description", "")
+        url = article.get("url", "")
+        prompt = f"Расскажи подробнее об этой теме: {title}. {desc}\n\nНапиши интересный рассказ на 3-4 абзаца по-человечески, без форматирования." if lang == "ru" else f"Tell more about: {title}. {desc}\n\nWrite 3-4 interesting paragraphs, conversational."
+        resp = ai_client.chat.completions.create(
+            model="gpt-4o-mini",
+            messages=[{"role": "user", "content": prompt}],
+            max_tokens=600, temperature=0.7
+        )
+        summary = resp.choices[0].message.content.strip()
+        if url:
+            link = "Читать оригинал" if lang == "ru" else "Read original"
+            return f"{summary}\n\n🔗 {link}: {url}"
+        return summary
+    except:
+        return article.get("description") or ("Описание недоступно." if lang == "ru" else "Unavailable.")
 
-            # Water
-            water = await db.fetchval("SELECT COALESCE(SUM(ml),0) FROM water_log WHERE user_id=$1 AND log_date=$2", uid, today)
-            # Sleep
-            sleep = await db.fetchrow("SELECT hours FROM sleep_log WHERE user_id=$1 AND log_date=$2", uid, today)
-            # Finance
-            income = await db.fetchval("SELECT COALESCE(SUM(amount),0) FROM finances WHERE user_id=$1 AND type='income' AND DATE(created_at)=$2", uid, today)
-            expense = await db.fetchval("SELECT COALESCE(SUM(amount),0) FROM finances WHERE user_id=$1 AND type='expense' AND DATE(created_at)=$2", uid, today)
+async def get_news(query=None, lang="ru"):
+    articles = await fetch_articles(query or "positive world news", 5)
+    if not articles:
+        return None
+    titles = [a["title"] for a in articles]
+    translated = await translate_titles(titles, lang)
+    return "\n".join([f"{i+1}. {t}" for i, t in enumerate(translated)])
 
-            lines = ["Вечерняя сводка за сегодня:"]
-            lines.append(f"Воды выпито: {water} мл")
-            if sleep:
-                lines.append(f"Сон: {sleep['hours']} ч")
-            if income or expense:
-                lines.append(f"Доходы: {income} | Расходы: {expense}")
-            lines.append("\nКак прошёл твой день?")
+async def generate_image(prompt):
+    try:
+        response = ai_client.images.generate(model="gpt-image-1-mini", prompt=prompt, size="1024x1024", n=1)
+        item = response.data[0]
+        if hasattr(item, 'url') and item.url:
+            return item.url
+        elif hasattr(item, 'b64_json') and item.b64_json:
+            return f"data:image/png;base64,{item.b64_json}"
+        return None
+    except Exception as e:
+        logging.error(f"Ошибка генерации изображения: {e}")
+        return None
 
-            await bot.send_message(uid, "\n".join(lines))
+def calculate_sleep_times(wake_hour, wake_minute):
+    total_minutes = wake_hour * 60 + wake_minute
+    times = []
+    for cycles in [6, 5, 4]:
+        sleep_minutes = total_minutes - cycles * 90 - 15
+        if sleep_minutes < 0:
+            sleep_minutes += 24 * 60
+        h = sleep_minutes // 60
+        m = sleep_minutes % 60
+        times.append(f"{h:02d}:{m:02d} ({cycles} цикла = {cycles * 1.5:.0f}ч)")
+    return times
 
-# ─── Goal progress checker ────────────────────────────────────────────────────
-async def goal_progress_checker():
-    """Periodically asks about goal progress."""
-    while True:
-        await asyncio.sleep(86400 * 3)  # every 3 days
-        try:
-            goals = await db.fetch("SELECT g.*, u.user_id FROM goals g JOIN users u ON g.user_id=u.user_id WHERE g.is_done=FALSE")
-            for goal in goals:
-                kb = InlineKeyboardMarkup(inline_keyboard=[
-                    [InlineKeyboardButton(text="Обновить прогресс", callback_data=f"goal_update_{goal['id']}")]
-                ])
-                await bot.send_message(
-                    goal["user_id"],
-                    f"Как дела с целью '{goal['title']}'? Текущий прогресс: {goal['progress']}%",
-                    reply_markup=kb
-                )
-        except Exception as e:
-            log.error(f"Goal checker error: {e}")
+async def get_ai_recipe(lang="ru"):
+    try:
+        prompt = "Suggest one simple recipe. Name, ingredients and brief method. Conversational." if lang == "en" else "Предложи один простой рецепт. Название, ингредиенты и краткий способ. По-человечески."
+        response = ai_client.chat.completions.create(model="gpt-4o-mini", messages=[{"role": "system", "content": prompt}, {"role": "user", "content": "Рецепт" if lang == "ru" else "Recipe"}], max_tokens=400, temperature=0.9)
+        return response.choices[0].message.content
+    except:
+        return "Рецепт недоступен." if lang == "ru" else "Recipe unavailable."
 
-# ─── Cycle reminder ───────────────────────────────────────────────────────────
-async def cycle_reminder():
-    """Checks cycle and sends reminder 3 days before."""
-    while True:
-        await asyncio.sleep(3600)  # check every hour
-        try:
-            cycles = await db.fetch("SELECT * FROM health_cycle")
-            for cycle in cycles:
-                start = cycle["start_date"]
-                length = cycle["cycle_days"]
-                next_cycle = start + timedelta(days=length)
-                days_left = (next_cycle - datetime.now().date()).days
-                if days_left == 3:
-                    await bot.send_message(
-                        cycle["user_id"],
-                        f"Через 3 дня ожидается начало нового цикла (примерно {next_cycle.strftime('%d.%m')}). Позаботься о себе заранее."
-                    )
-        except Exception as e:
-            log.error(f"Cycle reminder error: {e}")
+async def get_ai_movie(lang="ru"):
+    try:
+        prompt = "Recommend one movie or series. Title, genre, brief description, why to watch. Conversational." if lang == "en" else "Посоветуй один фильм или сериал. Название, жанр, описание, почему стоит. По-человечески."
+        response = ai_client.chat.completions.create(model="gpt-4o-mini", messages=[{"role": "system", "content": prompt}, {"role": "user", "content": "Что посмотреть?" if lang == "ru" else "What to watch?"}], max_tokens=250, temperature=0.9)
+        return response.choices[0].message.content
+    except:
+        return "Рекомендация недоступна." if lang == "ru" else "Recommendation unavailable."
 
-# ─── Handlers: /start ─────────────────────────────────────────────────────────
-@dp.message(Command("start"))
-async def cmd_start(message: Message):
-    await ensure_user(message.from_user.id, message.from_user.username or "", message.from_user.first_name or "")
-    name = message.from_user.first_name or "подруга"
-    await message.answer(
-        f"Привет, {name}! Я София, твой личный ассистент.\nЧем могу помочь сегодня?",
-        reply_markup=kb_main()
-    )
+async def rephrase_reminder(text, lang="ru"):
+    try:
+        system = "Rephrase as a reminder — brief, no 'me', no 'remind', no time. Just essence." if lang == "en" else "Перефразируй как напоминание — коротко, без 'мне', без 'напомни', без времени. Только суть."
+        response = ai_client.chat.completions.create(model="gpt-4o-mini", messages=[{"role": "system", "content": system}, {"role": "user", "content": text}], max_tokens=80, temperature=0.3)
+        result = response.choices[0].message.content.strip()
+        return result[0].upper() + result[1:] if result else text
+    except:
+        return text
 
-@dp.message(Command("menu"))
-async def cmd_menu(message: Message):
-    await ensure_user(message.from_user.id)
-    await message.answer("Главное меню:", reply_markup=kb_main())
+async def analyze_image(image_data, user_question, lang="ru"):
+    try:
+        prompt = user_question if user_question else ("Опиши что на этом фото подробно" if lang == "ru" else "Describe what's in this photo in detail")
+        response = ai_client.chat.completions.create(
+            model="gpt-4o-mini",
+            messages=[{"role": "user", "content": [{"type": "text", "text": prompt}, {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{image_data}"}}]}],
+            max_tokens=600
+        )
+        return response.choices[0].message.content
+    except Exception as e:
+        logging.error(f"Ошибка анализа фото: {e}")
+        return "Не удалось проанализировать фото." if lang == "ru" else "Could not analyze the photo."
 
-# ─── Main menu callbacks ───────────────────────────────────────────────────────
-@dp.callback_query(F.data == "menu_back")
-async def cb_menu_back(cq: CallbackQuery):
-    await cq.message.edit_text("Главное меню:", reply_markup=kb_main())
-    await cq.answer()
+async def transcribe_voice(file_path):
+    try:
+        transcriber = aai.Transcriber()
+        config = aai.TranscriptionConfig(language_code="ru")
+        transcript = transcriber.transcribe(file_path, config=config)
+        if transcript.status == aai.TranscriptStatus.error:
+            raise Exception(f"Transcription error: {transcript.error}")
+        return transcript.text
+    except Exception as e:
+        logging.error(f"Transcription failed: {e}")
+        raise
 
-@dp.callback_query(F.data == "menu_close")
-async def cb_menu_close(cq: CallbackQuery):
-    await cq.message.delete()
-    await cq.answer("Меню закрыто")
+def extract_exact_time(text):
+    m = re.search(r'(\d{1,2})[:\.](\d{2})', text)
+    if m:
+        h, min_ = int(m.group(1)), int(m.group(2))
+        if 0 <= h <= 23 and 0 <= min_ <= 59:
+            return h, min_
+    return None, None
 
-@dp.callback_query(F.data == "menu_diary")
-async def cb_menu_diary(cq: CallbackQuery):
-    await cq.message.edit_text("Дневник:", reply_markup=kb_diary())
-    await cq.answer()
+def extract_relative_time(text):
+    m = re.search(r'через\s+(\d+)\s*(минут|мин|минуты|минуту)|in\s+(\d+)\s*(minutes|mins|minute)', text, re.IGNORECASE)
+    if m:
+        return int(m.group(1) or m.group(3)), 'minutes'
+    m = re.search(r'через\s+(\d+)\s*(час|часа|часов)|in\s+(\d+)\s*(hours|hour)', text, re.IGNORECASE)
+    if m:
+        return int(m.group(1) or m.group(3)), 'hours'
+    return None, None
 
-@dp.callback_query(F.data == "menu_settings")
-async def cb_menu_settings(cq: CallbackQuery):
-    await cq.message.edit_text("Настройки:", reply_markup=kb_settings())
-    await cq.answer()
+def is_reminder_request(text):
+    kw_ru = ["напомни", "напоминание", "пришли напоминание"]
+    kw_en = ["remind me", "set a reminder", "reminder"]
+    has_time = re.search(r'\d{1,2}[:.]\d{2}', text) or re.search(r'через\s+\d+|in\s+\d+', text, re.IGNORECASE)
+    return has_time and (any(k in text.lower() for k in kw_ru) or any(k in text.lower() for k in kw_en))
 
-# ─── Morning ──────────────────────────────────────────────────────────────────
-@dp.callback_query(F.data == "menu_morning")
-async def cb_morning(cq: CallbackQuery):
-    user = await get_user(cq.from_user.id)
-    city = user["city"] if user else "Москва"
-    weather = await get_weather(city)
-    motivations = [
-        "Отличное начало нового дня! Ты готова к новым свершениям.",
-        "Каждое утро — это шанс стать лучшей версией себя.",
-        "Сегодня будет хороший день. Улыбнись и вперёд!",
-        "Ты сильная и всё у тебя получится.",
-    ]
-    motivation = random.choice(motivations)
-    text = f"Доброе утро!\n\n{weather}\n\n{motivation}"
-    await cq.message.edit_text(text, reply_markup=kb_back())
-    await cq.answer()
+def is_news_request(text):
+    kw_ru = ["новост", "что случилось", "что происходит", "последние события", "в мире сейчас", "расскажи новости"]
+    kw_en = ["news", "what happened", "latest events", "current events"]
+    return any(k in text.lower() for k in kw_ru) or any(k in text.lower() for k in kw_en)
 
-# ─── Interesting ──────────────────────────────────────────────────────────────
-def kb_interesting():
-    return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="🔬 Наука", callback_data="interesting_science"),
-         InlineKeyboardButton(text="📜 История", callback_data="interesting_history")],
-        [InlineKeyboardButton(text="💻 Технологии", callback_data="interesting_tech"),
-         InlineKeyboardButton(text="🌍 Факты", callback_data="interesting_facts")],
-        [InlineKeyboardButton(text="✈️ Путешествия", callback_data="interesting_travel")],
-        [InlineKeyboardButton(text="◀️ Назад", callback_data="menu_back")],
-    ])
+def is_image_gen_request(text):
+    kw_ru = ["нарисуй", "сгенерируй картинку", "создай изображение", "сделай картинку"]
+    kw_en = ["draw", "generate image", "create image", "make a picture"]
+    return any(k in text.lower() for k in kw_ru) or any(k in text.lower() for k in kw_en)
 
-@dp.callback_query(F.data == "menu_interesting")
-async def cb_interesting(cq: CallbackQuery):
-    await cq.message.edit_text("Что тебя интересует?", reply_markup=kb_interesting())
-    await cq.answer()
+def is_weather_request(text):
+    kw_ru = ["погода", "какая погода", "погоду", "погодой", "температура", "тепло ли", "холодно ли", "дождь", "зонт"]
+    kw_en = ["weather", "temperature", "rain", "sunny", "cold outside", "warm outside"]
+    return any(k in text.lower() for k in kw_ru) or any(k in text.lower() for k in kw_en)
 
-@dp.callback_query(F.data.startswith("interesting_"))
-async def cb_interesting_category(cq: CallbackQuery):
-    category = cq.data.split("_")[1]
-    await cq.message.edit_text("Загружаю статью...")
-    text = await get_interesting_article(category)
-    kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="🔄 Ещё", callback_data=cq.data),
-         InlineKeyboardButton(text="◀️ Назад", callback_data="menu_interesting")],
-    ])
-    await cq.message.edit_text(text, reply_markup=kb)
-    await cq.answer()
+def is_change_style_request(text):
+    kw_ru = ["измени стиль", "смени стиль", "общайся как", "хочу чтобы ты общалась", "перейди на", "говори со мной как"]
+    kw_en = ["change style", "communicate as", "talk to me as", "switch to style"]
+    return any(k in text.lower() for k in kw_ru) or any(k in text.lower() for k in kw_en)
 
-# ─── Settings ─────────────────────────────────────────────────────────────────
-@dp.callback_query(F.data == "settings_profile")
-async def cb_profile(cq: CallbackQuery):
-    user = await get_user(cq.from_user.id)
+async def send_scheduled_reminder(context: ContextTypes.DEFAULT_TYPE):
+    job_data = context.job.data
+    user_id = job_data["user_id"]
+    essence = job_data["essence"]
+    user = await get_user(user_id)
+    name = user["name"] if user else ""
+    lang = user.get("language", "ru") if user else "ru"
+    await context.bot.send_message(chat_id=user_id, text=t(lang, "reminder", name=name, text=essence))
+
+async def send_water_reminder(context: ContextTypes.DEFAULT_TYPE):
+    user_id = context.job.data
+    user = await get_user(user_id)
+    name = user["name"] if user else ""
+    lang = user.get("language", "ru") if user else "ru"
+    await context.bot.send_message(chat_id=user_id, text=t(lang, "water", name=name))
+
+async def send_morning_plan(context: ContextTypes.DEFAULT_TYPE):
+    user_id = context.job.data
+    user = await get_user(user_id)
     if not user:
-        await cq.answer("Профиль не найден")
         return
-    style_names = {"girlfriend": "Подружка", "mentor": "Наставник", "pro": "Профессионал"}
-    text = (
-        f"Профиль:\n"
-        f"Имя: {cq.from_user.first_name}\n"
-        f"Город: {user['city']}\n"
-        f"Язык: {user['language']}\n"
-        f"Стиль: {style_names.get(user['style'], user['style'])}\n"
-        f"Погода утром: {'да' if user['morning_weather'] else 'нет'}\n"
-        f"Мотивация утром: {'да' if user['morning_motivation'] else 'нет'}\n"
-        f"Напомн. о воде: {'да' if user['water_remind'] else 'нет'}\n"
-        f"Вечерняя сводка: {'да' if user['evening_summary'] else 'нет'}"
-    )
-    await cq.message.edit_text(text, reply_markup=kb_back("menu_settings"))
-    await cq.answer()
-
-@dp.callback_query(F.data == "settings_style")
-async def cb_style(cq: CallbackQuery):
-    kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="💝 Подружка", callback_data="style_set_girlfriend")],
-        [InlineKeyboardButton(text="🎓 Наставник", callback_data="style_set_mentor")],
-        [InlineKeyboardButton(text="💼 Профессионал", callback_data="style_set_pro")],
-        [InlineKeyboardButton(text="◀️ Назад", callback_data="menu_settings")],
-    ])
-    await cq.message.edit_text("Выбери стиль общения:", reply_markup=kb)
-    await cq.answer()
-
-@dp.callback_query(F.data.startswith("style_set_"))
-async def cb_style_set(cq: CallbackQuery):
-    style = cq.data.replace("style_set_", "")
-    await db.execute("UPDATE users SET style=$1 WHERE user_id=$2", style, cq.from_user.id)
-    names = {"girlfriend": "Подружка", "mentor": "Наставник", "pro": "Профессионал"}
-    await cq.message.edit_text(f"Стиль изменён на: {names.get(style, style)}", reply_markup=kb_back("menu_settings"))
-    await cq.answer()
-
-@dp.callback_query(F.data == "settings_city")
-async def cb_city(cq: CallbackQuery, state: FSMContext):
-    await cq.message.edit_text("Напиши название своего города:")
-    await state.set_state(States.city_input)
-    await cq.answer()
-
-@dp.message(States.city_input)
-async def city_input(message: Message, state: FSMContext):
-    await db.execute("UPDATE users SET city=$1 WHERE user_id=$2", message.text, message.from_user.id)
-    await state.clear()
-    await message.answer(f"Город изменён на: {message.text}", reply_markup=kb_main())
-
-@dp.callback_query(F.data == "settings_lang")
-async def cb_lang(cq: CallbackQuery):
-    kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="🇷🇺 Русский", callback_data="lang_set_ru"),
-         InlineKeyboardButton(text="🇬🇧 English", callback_data="lang_set_en")],
-        [InlineKeyboardButton(text="◀️ Назад", callback_data="menu_settings")],
-    ])
-    await cq.message.edit_text("Выбери язык:", reply_markup=kb)
-    await cq.answer()
-
-@dp.callback_query(F.data.startswith("lang_set_"))
-async def cb_lang_set(cq: CallbackQuery):
-    lang = cq.data.replace("lang_set_", "")
-    await db.execute("UPDATE users SET language=$1 WHERE user_id=$2", lang, cq.from_user.id)
-    await cq.message.edit_text(f"Язык изменён", reply_markup=kb_back("menu_settings"))
-    await cq.answer()
-
-@dp.callback_query(F.data.startswith("toggle_"))
-async def cb_toggle(cq: CallbackQuery):
-    field_map = {
-        "toggle_morning_weather":    "morning_weather",
-        "toggle_morning_motivation": "morning_motivation",
-        "toggle_water_remind":       "water_remind",
-        "toggle_evening_summary":    "evening_summary",
-    }
-    field = field_map.get(cq.data)
-    if not field:
-        await cq.answer()
-        return
-    current = await db.fetchval(f"SELECT {field} FROM users WHERE user_id=$1", cq.from_user.id)
-    await db.execute(f"UPDATE users SET {field}=$1 WHERE user_id=$2", not current, cq.from_user.id)
-    state_text = "включено" if not current else "выключено"
-    await cq.answer(f"{state_text.capitalize()}")
-    await cq.message.edit_text("Настройки:", reply_markup=kb_settings())
-
-@dp.callback_query(F.data == "settings_forget")
-async def cb_forget(cq: CallbackQuery):
-    await db.execute("DELETE FROM user_memory WHERE user_id=$1", cq.from_user.id)
-    await db.execute("DELETE FROM conversation_history WHERE user_id=$1", cq.from_user.id)
-    await cq.message.edit_text("Я забыла всё о тебе. Начнём сначала!", reply_markup=kb_main())
-    await cq.answer()
-
-# ─── Finance ──────────────────────────────────────────────────────────────────
-def kb_finance():
-    return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="➕ Доход", callback_data="finance_income"),
-         InlineKeyboardButton(text="➖ Расход", callback_data="finance_expense")],
-        [InlineKeyboardButton(text="📊 Статистика", callback_data="finance_stats")],
-        [InlineKeyboardButton(text="◀️ Назад", callback_data="menu_diary")],
-    ])
-
-@dp.callback_query(F.data == "diary_finance")
-async def cb_finance(cq: CallbackQuery):
-    await cq.message.edit_text("Финансы:", reply_markup=kb_finance())
-    await cq.answer()
-
-@dp.callback_query(F.data == "finance_income")
-async def cb_finance_income(cq: CallbackQuery, state: FSMContext):
-    await cq.message.edit_text("Введи сумму и описание дохода (например: 5000 зарплата):")
-    await state.set_state(States.finance_add_income)
-    await cq.answer()
-
-@dp.callback_query(F.data == "finance_expense")
-async def cb_finance_expense(cq: CallbackQuery, state: FSMContext):
-    await cq.message.edit_text("Введи сумму и описание расхода (например: 500 кафе):")
-    await state.set_state(States.finance_add_expense)
-    await cq.answer()
-
-@dp.message(States.finance_add_income)
-async def finance_income_input(message: Message, state: FSMContext):
-    parts = message.text.split(maxsplit=1)
-    try:
-        amount = float(parts[0])
-        desc = parts[1] if len(parts) > 1 else ""
-        await db.execute("INSERT INTO finances(user_id,type,amount,description) VALUES($1,'income',$2,$3)",
-                         message.from_user.id, amount, desc)
-        await state.clear()
-        await message.answer(f"Доход {amount} добавлен!", reply_markup=kb_finance())
-    except:
-        await message.answer("Не понял. Введи: сумма описание (например: 5000 зарплата)")
-
-@dp.message(States.finance_add_expense)
-async def finance_expense_input(message: Message, state: FSMContext):
-    parts = message.text.split(maxsplit=1)
-    try:
-        amount = float(parts[0])
-        desc = parts[1] if len(parts) > 1 else ""
-        await db.execute("INSERT INTO finances(user_id,type,amount,description) VALUES($1,'expense',$2,$3)",
-                         message.from_user.id, amount, desc)
-        await state.clear()
-        await message.answer(f"Расход {amount} добавлен!", reply_markup=kb_finance())
-    except:
-        await message.answer("Не понял. Введи: сумма описание (например: 500 кафе)")
-
-@dp.callback_query(F.data == "finance_stats")
-async def cb_finance_stats(cq: CallbackQuery):
-    uid = cq.from_user.id
-    today = datetime.now().date()
-    month_start = today.replace(day=1)
-    income = await db.fetchval("SELECT COALESCE(SUM(amount),0) FROM finances WHERE user_id=$1 AND type='income' AND DATE(created_at)>=$2", uid, month_start)
-    expense = await db.fetchval("SELECT COALESCE(SUM(amount),0) FROM finances WHERE user_id=$1 AND type='expense' AND DATE(created_at)>=$2", uid, month_start)
-    balance = income - expense
-    rows = await db.fetch("SELECT type,amount,description,created_at FROM finances WHERE user_id=$1 ORDER BY created_at DESC LIMIT 5", uid)
-    lines = [f"Финансы за месяц:", f"Доходы: {income}", f"Расходы: {expense}", f"Баланс: {balance}", "", "Последние операции:"]
-    for r in rows:
-        sign = "+" if r["type"] == "income" else "-"
-        lines.append(f"{sign}{r['amount']} {r['description']} ({r['created_at'].strftime('%d.%m')})")
-    await cq.message.edit_text("\n".join(lines), reply_markup=kb_finance())
-    await cq.answer()
-
-# ─── Sleep ────────────────────────────────────────────────────────────────────
-@dp.callback_query(F.data == "diary_sleep")
-async def cb_sleep(cq: CallbackQuery, state: FSMContext):
-    await cq.message.edit_text("Сколько часов ты спала? (например: 7.5)")
-    await state.set_state(States.sleep_input)
-    await cq.answer()
-
-@dp.message(States.sleep_input)
-async def sleep_input_handler(message: Message, state: FSMContext):
-    try:
-        hours = float(message.text.replace(",", "."))
-        today = datetime.now().date()
-        await db.execute("INSERT INTO sleep_log(user_id,hours,log_date) VALUES($1,$2,$3) ON CONFLICT DO NOTHING",
-                         message.from_user.id, hours, today)
-        await state.clear()
-        if hours < 6:
-            comment = "Маловато. Постарайся поспать побольше сегодня!"
-        elif hours < 8:
-            comment = "Неплохо, но 8 часов были бы идеальны."
-        else:
-            comment = "Отлично! Хороший сон — основа здоровья."
-        await message.answer(f"Записала: {hours} ч. {comment}", reply_markup=kb_diary())
-    except:
-        await message.answer("Введи число, например: 7 или 7.5")
-
-# ─── Water ────────────────────────────────────────────────────────────────────
-def kb_water():
-    return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="200 мл", callback_data="water_200"),
-         InlineKeyboardButton(text="300 мл", callback_data="water_300"),
-         InlineKeyboardButton(text="500 мл", callback_data="water_500")],
-        [InlineKeyboardButton(text="📊 Сегодня", callback_data="water_stats"),
-         InlineKeyboardButton(text="✏️ Своё", callback_data="water_custom")],
-        [InlineKeyboardButton(text="◀️ Назад", callback_data="menu_diary")],
-    ])
-
-@dp.callback_query(F.data == "diary_water")
-async def cb_water(cq: CallbackQuery):
-    today = datetime.now().date()
-    total = await db.fetchval("SELECT COALESCE(SUM(ml),0) FROM water_log WHERE user_id=$1 AND log_date=$2", cq.from_user.id, today)
-    await cq.message.edit_text(f"Вода. Выпито сегодня: {total} мл (цель: 2000 мл)", reply_markup=kb_water())
-    await cq.answer()
-
-@dp.callback_query(F.data.startswith("water_") & ~F.data.in_({"water_stats", "water_custom"}))
-async def cb_water_add(cq: CallbackQuery):
-    ml_map = {"water_200": 200, "water_300": 300, "water_500": 500}
-    ml = ml_map.get(cq.data, 0)
-    if ml:
-        today = datetime.now().date()
-        await db.execute("INSERT INTO water_log(user_id,ml,log_date) VALUES($1,$2,$3)", cq.from_user.id, ml, today)
-        total = await db.fetchval("SELECT COALESCE(SUM(ml),0) FROM water_log WHERE user_id=$1 AND log_date=$2", cq.from_user.id, today)
-        await cq.answer(f"Добавлено {ml} мл. Всего: {total} мл")
-        await cq.message.edit_text(f"Вода. Выпито сегодня: {total} мл (цель: 2000 мл)", reply_markup=kb_water())
-
-@dp.callback_query(F.data == "water_custom")
-async def cb_water_custom(cq: CallbackQuery, state: FSMContext):
-    await cq.message.edit_text("Введи количество мл:")
-    await state.set_state(States.water_input)
-    await cq.answer()
-
-@dp.message(States.water_input)
-async def water_input_handler(message: Message, state: FSMContext):
-    try:
-        ml = int(message.text)
-        today = datetime.now().date()
-        await db.execute("INSERT INTO water_log(user_id,ml,log_date) VALUES($1,$2,$3)", message.from_user.id, ml, today)
-        total = await db.fetchval("SELECT COALESCE(SUM(ml),0) FROM water_log WHERE user_id=$1 AND log_date=$2", message.from_user.id, today)
-        await state.clear()
-        await message.answer(f"Добавлено {ml} мл. Всего сегодня: {total} мл", reply_markup=kb_diary())
-    except:
-        await message.answer("Введи число мл, например: 250")
-
-@dp.callback_query(F.data == "water_stats")
-async def cb_water_stats(cq: CallbackQuery):
-    today = datetime.now().date()
-    total = await db.fetchval("SELECT COALESCE(SUM(ml),0) FROM water_log WHERE user_id=$1 AND log_date=$2", cq.from_user.id, today)
-    percent = min(int(total / 2000 * 100), 100)
-    bar = "█" * (percent // 10) + "░" * (10 - percent // 10)
-    await cq.message.edit_text(f"Вода сегодня: {total} мл из 2000 мл\n[{bar}] {percent}%", reply_markup=kb_water())
-    await cq.answer()
-
-# ─── Habits ───────────────────────────────────────────────────────────────────
-@dp.callback_query(F.data == "diary_habits")
-async def cb_habits(cq: CallbackQuery):
-    habits = await db.fetch("SELECT * FROM habits WHERE user_id=$1", cq.from_user.id)
-    kb = InlineKeyboardMarkup(inline_keyboard=[])
-    for h in habits:
-        done = h["last_done"] == datetime.now().date()
-        mark = "✅" if done else "⬜"
-        kb.inline_keyboard.append([InlineKeyboardButton(text=f"{mark} {h['name']} (🔥{h['streak']})", callback_data=f"habit_toggle_{h['id']}")])
-    kb.inline_keyboard.append([InlineKeyboardButton(text="➕ Добавить привычку", callback_data="habit_add")])
-    kb.inline_keyboard.append([InlineKeyboardButton(text="◀️ Назад", callback_data="menu_diary")])
-    text = "Привычки:" if habits else "У тебя пока нет привычек. Добавь первую!"
-    await cq.message.edit_text(text, reply_markup=kb)
-    await cq.answer()
-
-@dp.callback_query(F.data.startswith("habit_toggle_"))
-async def cb_habit_toggle(cq: CallbackQuery):
-    habit_id = int(cq.data.split("_")[2])
-    habit = await db.fetchrow("SELECT * FROM habits WHERE id=$1", habit_id)
-    today = datetime.now().date()
-    if habit["last_done"] == today:
-        await cq.answer("Уже отмечено сегодня!")
-        return
-    new_streak = habit["streak"] + 1
-    await db.execute("UPDATE habits SET streak=$1, last_done=$2 WHERE id=$3", new_streak, today, habit_id)
-    await cq.answer(f"Отмечено! Стрик: {new_streak} дней 🔥")
-    # Refresh
-    await cb_habits(cq)
-
-@dp.callback_query(F.data == "habit_add")
-async def cb_habit_add(cq: CallbackQuery, state: FSMContext):
-    await cq.message.edit_text("Как называется привычка? (например: Зарядка, Чтение, Медитация)")
-    await state.set_state(States.habit_add)
-    await cq.answer()
-
-@dp.message(States.habit_add)
-async def habit_add_handler(message: Message, state: FSMContext):
-    await db.execute("INSERT INTO habits(user_id,name) VALUES($1,$2)", message.from_user.id, message.text)
-    await state.clear()
-    await message.answer(f"Привычка '{message.text}' добавлена!", reply_markup=kb_diary())
-
-# ─── Notes ────────────────────────────────────────────────────────────────────
-@dp.callback_query(F.data == "diary_notes")
-async def cb_notes(cq: CallbackQuery):
-    notes = await db.fetch("SELECT * FROM notes WHERE user_id=$1 ORDER BY created_at DESC LIMIT 10", cq.from_user.id)
-    kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="➕ Добавить заметку", callback_data="note_add")],
-        [InlineKeyboardButton(text="◀️ Назад", callback_data="menu_diary")],
-    ])
-    if notes:
-        lines = ["Твои заметки:"]
-        for n in notes:
-            lines.append(f"- {n['text'][:50]}{'...' if len(n['text']) > 50 else ''}")
-        text = "\n".join(lines)
+    name = user["name"]
+    city = user.get("city") or "Москва"
+    lang = user.get("language", "ru")
+    reminders = await get_reminders(user_id)
+    text = t(lang, "morning", name=name)
+    if user.get("morning_motivation"):
+        text += f"{random.choice(MOTIVATIONAL_QUOTES[lang])}\n\n"
+    if user.get("morning_weather"):
+        weather = await get_weather(city, lang)
+        text += f"{weather}\n\n"
+    if reminders:
+        plan_text = "\n".join([f"{r['time']} — {r['text']}" for r in sorted(reminders, key=lambda x: x["time"])])
+        title = "Ваш план на сегодня:" if lang == "ru" else "Your plan for today:"
+        text += f"{title}\n\n{plan_text}"
     else:
-        text = "Заметок пока нет."
-    await cq.message.edit_text(text, reply_markup=kb)
-    await cq.answer()
+        text += t(lang, "no_plan")
+    await context.bot.send_message(chat_id=user_id, text=text)
 
-@dp.callback_query(F.data == "note_add")
-async def cb_note_add(cq: CallbackQuery, state: FSMContext):
-    await cq.message.edit_text("Напиши заметку:")
-    await state.set_state(States.note_add)
-    await cq.answer()
-
-@dp.message(States.note_add)
-async def note_add_handler(message: Message, state: FSMContext):
-    await db.execute("INSERT INTO notes(user_id,text) VALUES($1,$2)", message.from_user.id, message.text)
-    await state.clear()
-    await message.answer("Заметка сохранена!", reply_markup=kb_diary())
-
-# ─── Shopping ─────────────────────────────────────────────────────────────────
-@dp.callback_query(F.data == "diary_shopping")
-async def cb_shopping(cq: CallbackQuery):
-    items = await db.fetch("SELECT * FROM shopping WHERE user_id=$1 AND is_done=FALSE ORDER BY created_at", cq.from_user.id)
-    kb = InlineKeyboardMarkup(inline_keyboard=[])
-    for item in items:
-        kb.inline_keyboard.append([
-            InlineKeyboardButton(text=f"✅ {item['item']}", callback_data=f"shop_done_{item['id']}")
-        ])
-    kb.inline_keyboard.append([InlineKeyboardButton(text="➕ Добавить", callback_data="shop_add")])
-    kb.inline_keyboard.append([InlineKeyboardButton(text="◀️ Назад", callback_data="menu_diary")])
-    text = "Список покупок:" if items else "Список покупок пуст."
-    await cq.message.edit_text(text, reply_markup=kb)
-    await cq.answer()
-
-@dp.callback_query(F.data.startswith("shop_done_"))
-async def cb_shop_done(cq: CallbackQuery):
-    item_id = int(cq.data.split("_")[2])
-    await db.execute("UPDATE shopping SET is_done=TRUE WHERE id=$1", item_id)
-    await cq.answer("Куплено!")
-    await cb_shopping(cq)
-
-@dp.callback_query(F.data == "shop_add")
-async def cb_shop_add(cq: CallbackQuery, state: FSMContext):
-    await cq.message.edit_text("Что добавить в список?")
-    await state.set_state(States.shopping_add)
-    await cq.answer()
-
-@dp.message(States.shopping_add)
-async def shopping_add_handler(message: Message, state: FSMContext):
-    items = [i.strip() for i in message.text.replace(",", "\n").split("\n") if i.strip()]
-    for item in items:
-        await db.execute("INSERT INTO shopping(user_id,item) VALUES($1,$2)", message.from_user.id, item)
-    await state.clear()
-    await message.answer(f"Добавлено: {', '.join(items)}", reply_markup=kb_diary())
-
-# ─── Recipes ──────────────────────────────────────────────────────────────────
-def kb_recipes():
-    return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="📚 Мои рецепты", callback_data="recipes_mine")],
-        [InlineKeyboardButton(text="🎲 Рандомный рецепт", callback_data="recipes_random")],
-        [InlineKeyboardButton(text="◀️ Назад", callback_data="menu_diary")],
-    ])
-
-def kb_recipe_categories():
-    return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="🍲 Супы", callback_data="recipe_cat_soup"),
-         InlineKeyboardButton(text="🍖 Второе", callback_data="recipe_cat_main")],
-        [InlineKeyboardButton(text="🥗 Салаты", callback_data="recipe_cat_salad"),
-         InlineKeyboardButton(text="🍰 Десерты", callback_data="recipe_cat_dessert")],
-        [InlineKeyboardButton(text="🌟 Тренды", callback_data="recipe_cat_trend")],
-        [InlineKeyboardButton(text="◀️ Назад", callback_data="diary_recipes")],
-    ])
-
-@dp.callback_query(F.data == "diary_recipes")
-async def cb_recipes(cq: CallbackQuery):
-    await cq.message.edit_text("Рецепты:", reply_markup=kb_recipes())
-    await cq.answer()
-
-@dp.callback_query(F.data == "recipes_mine")
-async def cb_recipes_mine(cq: CallbackQuery):
-    recipes = await db.fetch("SELECT * FROM recipes WHERE user_id=$1 ORDER BY created_at DESC", cq.from_user.id)
-    if not recipes:
-        await cq.message.edit_text("У тебя пока нет сохранённых рецептов.", reply_markup=kb_back("diary_recipes"))
-        await cq.answer()
+async def send_evening_news(context: ContextTypes.DEFAULT_TYPE):
+    user_id = context.job.data
+    user = await get_user(user_id)
+    if not user:
         return
-    kb = InlineKeyboardMarkup(inline_keyboard=[])
-    for r in recipes:
-        kb.inline_keyboard.append([
-            InlineKeyboardButton(text=f"🍽 {r['title']}", callback_data=f"recipe_view_{r['id']}"),
-            InlineKeyboardButton(text="🗑", callback_data=f"recipe_del_{r['id']}"),
-        ])
-    kb.inline_keyboard.append([InlineKeyboardButton(text="◀️ Назад", callback_data="diary_recipes")])
-    await cq.message.edit_text("Мои рецепты:", reply_markup=kb)
-    await cq.answer()
-
-@dp.callback_query(F.data.startswith("recipe_view_"))
-async def cb_recipe_view(cq: CallbackQuery):
-    rid = int(cq.data.split("_")[2])
-    recipe = await db.fetchrow("SELECT * FROM recipes WHERE id=$1", rid)
-    if recipe:
-        await cq.message.edit_text(f"{recipe['title']}\n\n{recipe['content']}", reply_markup=kb_back("recipes_mine"))
-    await cq.answer()
-
-@dp.callback_query(F.data.startswith("recipe_del_"))
-async def cb_recipe_del(cq: CallbackQuery):
-    rid = int(cq.data.split("_")[2])
-    await db.execute("DELETE FROM recipes WHERE id=$1 AND user_id=$2", rid, cq.from_user.id)
-    await cq.answer("Рецепт удалён")
-    await cb_recipes_mine(cq)
-
-@dp.callback_query(F.data == "recipes_random")
-async def cb_recipes_random(cq: CallbackQuery):
-    await cq.message.edit_text("Выбери категорию:", reply_markup=kb_recipe_categories())
-    await cq.answer()
-
-@dp.callback_query(F.data.startswith("recipe_cat_"))
-async def cb_recipe_category(cq: CallbackQuery):
-    cat_map = {
-        "recipe_cat_soup":    ("суп", "горячий суп"),
-        "recipe_cat_main":    ("второе блюдо", "основное блюдо"),
-        "recipe_cat_salad":   ("салат", "свежий салат"),
-        "recipe_cat_dessert": ("десерт", "сладкий десерт"),
-        "recipe_cat_trend":   ("трендовое блюдо 2024 года", "модное блюдо"),
-    }
-    cat_key, cat_label = cat_map.get(cq.data, ("блюдо", "блюдо"))
-    seed = random.randint(1, 9999)
-    await cq.message.edit_text("Готовлю рецепт...")
-    prompt = f"Придумай рецепт {cat_key} (вариант #{seed}). Напиши: название, ингредиенты, шаги приготовления. Без звёздочек и Markdown."
+    name = user["name"]
+    lang = user.get("language", "ru")
+    dt = get_current_datetime(user.get("timezone", "Europe/Moscow"))
     try:
-        async with aiohttp.ClientSession() as session:
-            async with session.post(
-                f"{OPENAI_BASE}chat/completions",
-                headers={"Authorization": f"Bearer {OPENAI_KEY}", "Content-Type": "application/json"},
-                json={"model": MODEL, "messages": [{"role": "user", "content": prompt}],
-                      "max_tokens": 500, "temperature": 1.0},
-                timeout=aiohttp.ClientTimeout(total=30)
-            ) as resp:
-                data = await resp.json()
-                recipe_text = data["choices"][0]["message"]["content"].strip()
-                recipe_text = recipe_text.replace("**", "").replace("*", "").replace("`", "")
+        news = await get_news(lang=lang)
+        news_block = f"\n\nСвежие новости:\n{news}" if news else ""
+        prompt = f"Составь короткую вечернюю сводку для {name}. Сегодня {dt['ru']}.{news_block}\n\nВключи: тёплое приветствие, пару полезных советов на вечер, мотивирующее завершение. По-человечески, 3-4 абзаца, без форматирования." if lang == "ru" else f"Create a short evening summary for {name}. Today is {dt['en']}.{news_block}\n\nInclude: warm greeting, evening tips, motivating end. Natural, 3-4 paragraphs."
+        response = ai_client.chat.completions.create(model="gpt-4o-mini", messages=[{"role": "user", "content": prompt}], max_tokens=500, temperature=0.8)
+        await context.bot.send_message(chat_id=user_id, text=response.choices[0].message.content)
     except Exception as e:
-        recipe_text = "Не удалось загрузить рецепт. Попробуй ещё раз!"
+        logging.error(f"Ошибка вечерней сводки: {e}")
 
-    # Store temp recipe in state
-    title_line = recipe_text.split("\n")[0][:60]
-    kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="💾 Сохранить", callback_data=f"recipe_save_temp"),
-         InlineKeyboardButton(text="❌ Не нужно", callback_data="recipe_skip")],
-        [InlineKeyboardButton(text="🔄 Ещё рецепт", callback_data=cq.data),
-         InlineKeyboardButton(text="◀️ Назад", callback_data="recipes_random")],
-    ])
-    # Save temp to DB with temp flag
-    temp_id = await db.fetchval(
-        "INSERT INTO recipes(user_id, title, content) VALUES($1,$2,$3) RETURNING id",
-        cq.from_user.id, f"[TEMP] {title_line}", recipe_text
-    )
-    await cq.message.edit_text(recipe_text, reply_markup=InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="💾 Сохранить", callback_data=f"recipe_confirm_{temp_id}"),
-         InlineKeyboardButton(text="❌ Не нужно", callback_data=f"recipe_discard_{temp_id}")],
-        [InlineKeyboardButton(text="🔄 Ещё рецепт", callback_data=cq.data),
-         InlineKeyboardButton(text="◀️ Назад", callback_data="recipes_random")],
-    ]))
-    await cq.answer()
+def get_main_menu(lang="ru"):
+    ru = lang == "ru"
+    keyboard = [
+        [InlineKeyboardButton("🌅 Утро" if ru else "🌅 Morning", callback_data="menu_morning"), InlineKeyboardButton("📒 Дневник" if ru else "📒 Diary", callback_data="menu_diary")],
+        [InlineKeyboardButton("✨ Интересное" if ru else "✨ Interesting", callback_data="menu_interesting"), InlineKeyboardButton("⚙️ Настройки" if ru else "⚙️ Settings", callback_data="menu_settings")],
+        [InlineKeyboardButton("✖️ Закрыть меню" if ru else "✖️ Close menu", callback_data="close_menu")],
+    ]
+    return InlineKeyboardMarkup(keyboard)
 
-@dp.callback_query(F.data.startswith("recipe_confirm_"))
-async def cb_recipe_confirm(cq: CallbackQuery):
-    rid = int(cq.data.split("_")[2])
-    # Remove [TEMP] prefix
-    recipe = await db.fetchrow("SELECT * FROM recipes WHERE id=$1", rid)
-    if recipe:
-        new_title = recipe["title"].replace("[TEMP] ", "")
-        await db.execute("UPDATE recipes SET title=$1 WHERE id=$2", new_title, rid)
-    await cq.answer("Рецепт сохранён!")
-    await cq.message.edit_reply_markup(reply_markup=kb_back("diary_recipes"))
-
-@dp.callback_query(F.data.startswith("recipe_discard_"))
-async def cb_recipe_discard(cq: CallbackQuery):
-    rid = int(cq.data.split("_")[2])
-    await db.execute("DELETE FROM recipes WHERE id=$1 AND user_id=$2", rid, cq.from_user.id)
-    await cq.answer("Рецепт не сохранён")
-    await cq.message.edit_reply_markup(reply_markup=kb_back("diary_recipes"))
-
-@dp.callback_query(F.data == "recipe_skip")
-async def cb_recipe_skip(cq: CallbackQuery):
-    await cq.answer("Хорошо!")
-    await cq.message.edit_reply_markup(reply_markup=None)
-
-# ─── Watch list ───────────────────────────────────────────────────────────────
-@dp.callback_query(F.data == "diary_watch")
-async def cb_watch(cq: CallbackQuery):
-    items = await db.fetch("SELECT * FROM watch_list WHERE user_id=$1 AND is_watched=FALSE ORDER BY created_at DESC", cq.from_user.id)
-    kb = InlineKeyboardMarkup(inline_keyboard=[])
-    for item in items:
-        kb.inline_keyboard.append([
-            InlineKeyboardButton(text=f"🎬 {item['title']}", callback_data=f"watch_done_{item['id']}"),
-        ])
-    kb.inline_keyboard.append([InlineKeyboardButton(text="➕ Добавить", callback_data="watch_add")])
-    kb.inline_keyboard.append([InlineKeyboardButton(text="◀️ Назад", callback_data="menu_diary")])
-    text = "Что посмотреть:" if items else "Список пуст. Добавь что-нибудь интересное!"
-    await cq.message.edit_text(text, reply_markup=kb)
-    await cq.answer()
-
-@dp.callback_query(F.data == "watch_add")
-async def cb_watch_add(cq: CallbackQuery, state: FSMContext):
-    await cq.message.edit_text("Что добавить в список? (название фильма/сериала)")
-    await state.set_state(States.watch_add)
-    await cq.answer()
-
-@dp.message(States.watch_add)
-async def watch_add_handler(message: Message, state: FSMContext):
-    await db.execute("INSERT INTO watch_list(user_id,title) VALUES($1,$2)", message.from_user.id, message.text)
-    await state.clear()
-    await message.answer(f"Добавлено: {message.text}", reply_markup=kb_diary())
-
-@dp.callback_query(F.data.startswith("watch_done_"))
-async def cb_watch_done(cq: CallbackQuery):
-    item_id = int(cq.data.split("_")[2])
-    await db.execute("UPDATE watch_list SET is_watched=TRUE WHERE id=$1", item_id)
-    await cq.answer("Отмечено как просмотренное!")
-    await cb_watch(cq)
-
-# ─── Planner ──────────────────────────────────────────────────────────────────
-WEEKDAYS = ["Понедельник", "Вторник", "Среда", "Четверг", "Пятница", "Суббота", "Воскресенье"]
-
-def kb_planner():
-    return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="➕ Добавить занятие", callback_data="planner_add")],
-        [InlineKeyboardButton(text="📋 Расписание", callback_data="planner_view")],
-        [InlineKeyboardButton(text="◀️ Назад", callback_data="menu_diary")],
-    ])
-
-@dp.callback_query(F.data == "diary_planner")
-async def cb_planner(cq: CallbackQuery):
-    await cq.message.edit_text("Планер — еженедельные занятия:", reply_markup=kb_planner())
-    await cq.answer()
-
-@dp.callback_query(F.data == "planner_view")
-async def cb_planner_view(cq: CallbackQuery):
-    events = await db.fetch("SELECT * FROM planner WHERE user_id=$1 ORDER BY weekday, time_str", cq.from_user.id)
-    if not events:
-        await cq.message.edit_text("Расписание пусто.", reply_markup=kb_planner())
-        await cq.answer()
+async def show_menu(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    user = await get_user(user_id)
+    if not user or not user["onboarded"]:
+        await update.message.reply_text(t("ru", "not_started"))
         return
-    lines = ["Твоё расписание:"]
-    current_day = -1
-    for e in events:
-        if e["weekday"] != current_day:
-            lines.append(f"\n{WEEKDAYS[e['weekday']]}:")
-            current_day = e["weekday"]
-        lines.append(f"  {e['time_str']} — {e['title']}")
-    kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="🗑 Удалить", callback_data="planner_delete_menu")],
-        [InlineKeyboardButton(text="◀️ Назад", callback_data="diary_planner")],
-    ])
-    await cq.message.edit_text("\n".join(lines), reply_markup=kb)
-    await cq.answer()
+    lang = user.get("language", "ru")
+    await update.message.reply_text("🌸", reply_markup=get_main_menu(lang))
 
-@dp.callback_query(F.data == "planner_add")
-async def cb_planner_add(cq: CallbackQuery, state: FSMContext):
-    kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text=day, callback_data=f"planner_day_{i}")] for i, day in enumerate(WEEKDAYS)
-    ])
-    await cq.message.edit_text("Выбери день:", reply_markup=kb)
-    await state.set_state(States.planner_day)
-    await cq.answer()
+async def skills_command(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    user = await get_user(user_id)
+    lang = user.get("language", "ru") if user else "ru"
+    await update.message.reply_text(SKILLS_EN if lang == "en" else SKILLS_RU)
 
-@dp.callback_query(F.data.startswith("planner_day_"), States.planner_day)
-async def cb_planner_day(cq: CallbackQuery, state: FSMContext):
-    day_idx = int(cq.data.split("_")[2])
-    await state.update_data(weekday=day_idx)
-    await cq.message.edit_text(f"День: {WEEKDAYS[day_idx]}\nВведи время (например: 17:00):")
-    await state.set_state(States.planner_time)
-    await cq.answer()
-
-@dp.message(States.planner_time)
-async def planner_time_handler(message: Message, state: FSMContext):
-    await state.update_data(time_str=message.text)
-    await message.answer("Введи название занятия:")
-    await state.set_state(States.planner_title)
-
-@dp.message(States.planner_title)
-async def planner_title_handler(message: Message, state: FSMContext):
-    data = await state.get_data()
-    await db.execute(
-        "INSERT INTO planner(user_id, title, weekday, time_str) VALUES($1,$2,$3,$4)",
-        message.from_user.id, message.text, data["weekday"], data["time_str"]
-    )
-    await state.clear()
-    await message.answer(
-        f"Добавлено: {WEEKDAYS[data['weekday']]} в {data['time_str']} — {message.text}",
-        reply_markup=kb_planner()
-    )
-
-@dp.callback_query(F.data == "planner_delete_menu")
-async def cb_planner_delete_menu(cq: CallbackQuery):
-    events = await db.fetch("SELECT * FROM planner WHERE user_id=$1 ORDER BY weekday, time_str", cq.from_user.id)
-    kb = InlineKeyboardMarkup(inline_keyboard=[])
-    for e in events:
-        kb.inline_keyboard.append([
-            InlineKeyboardButton(
-                text=f"🗑 {WEEKDAYS[e['weekday']]} {e['time_str']} — {e['title']}",
-                callback_data=f"planner_del_{e['id']}"
-            )
-        ])
-    kb.inline_keyboard.append([InlineKeyboardButton(text="◀️ Назад", callback_data="planner_view")])
-    await cq.message.edit_text("Выбери что удалить:", reply_markup=kb)
-    await cq.answer()
-
-@dp.callback_query(F.data.startswith("planner_del_"))
-async def cb_planner_del(cq: CallbackQuery):
-    eid = int(cq.data.split("_")[2])
-    await db.execute("DELETE FROM planner WHERE id=$1 AND user_id=$2", eid, cq.from_user.id)
-    await cq.answer("Удалено!")
-    await cb_planner_view(cq)
-
-@dp.callback_query(F.data == "planner_quick_add")
-async def cb_planner_quick_add(cq: CallbackQuery, state: FSMContext):
-    await cq.message.edit_text("Отлично! Выбери день:")
-    kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text=day, callback_data=f"planner_day_{i}")] for i, day in enumerate(WEEKDAYS)
-    ])
-    await cq.message.edit_text("Выбери день:", reply_markup=kb)
-    await state.set_state(States.planner_day)
-    await cq.answer()
-
-@dp.callback_query(F.data == "planner_skip")
-async def cb_planner_skip(cq: CallbackQuery):
-    await cq.answer("Хорошо!")
-    await cq.message.edit_reply_markup(reply_markup=None)
-
-# ─── Health ───────────────────────────────────────────────────────────────────
-def kb_health():
-    return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="🌸 Цикл", callback_data="health_cycle"),
-         InlineKeyboardButton(text="💊 Таблетки", callback_data="health_pills")],
-        [InlineKeyboardButton(text="😰 Стресс", callback_data="health_stress")],
-        [InlineKeyboardButton(text="◀️ Назад", callback_data="menu_diary")],
-    ])
-
-# Health is accessible from diary via callback
-@dp.callback_query(F.data == "diary_health")
-async def cb_health(cq: CallbackQuery):
-    await cq.message.edit_text("Здоровье:", reply_markup=kb_health())
-    await cq.answer()
-
-# Cycle
-@dp.callback_query(F.data == "health_cycle")
-async def cb_cycle(cq: CallbackQuery):
-    cycle = await db.fetchrow("SELECT * FROM health_cycle WHERE user_id=$1 ORDER BY created_at DESC LIMIT 1", cq.from_user.id)
-    kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="📅 Установить дату цикла", callback_data="cycle_set")],
-        [InlineKeyboardButton(text="◀️ Назад", callback_data="diary_health")],
-    ])
-    if cycle:
-        start = cycle["start_date"]
-        length = cycle["cycle_days"]
-        next_cycle = start + timedelta(days=length)
-        days_left = (next_cycle - datetime.now().date()).days
-        text = (
-            f"Цикл:\nНачало: {start.strftime('%d.%m.%Y')}\n"
-            f"Длина цикла: {length} дней\n"
-            f"Следующий: {next_cycle.strftime('%d.%m.%Y')} (через {days_left} дн.)"
-        )
-    else:
-        text = "Данных о цикле нет. Установи дату начала последнего цикла."
-    await cq.message.edit_text(text, reply_markup=kb)
-    await cq.answer()
-
-@dp.callback_query(F.data == "cycle_set")
-async def cb_cycle_set(cq: CallbackQuery, state: FSMContext):
-    await cq.message.edit_text("Введи дату начала последнего цикла (ДД.ММ.ГГГГ):")
-    await state.set_state(States.cycle_start_date)
-    await cq.answer()
-
-@dp.message(States.cycle_start_date)
-async def cycle_date_handler(message: Message, state: FSMContext):
-    try:
-        date = datetime.strptime(message.text.strip(), "%d.%m.%Y").date()
-        await state.update_data(start_date=date)
-        await message.answer("Длина цикла в днях (обычно 28):")
-        await state.set_state(States.cycle_length)
-    except:
-        await message.answer("Неверный формат. Введи: ДД.ММ.ГГГГ")
-
-@dp.message(States.cycle_length)
-async def cycle_length_handler(message: Message, state: FSMContext):
-    try:
-        length = int(message.text.strip())
-        data = await state.get_data()
-        await db.execute(
-            "INSERT INTO health_cycle(user_id, start_date, cycle_days) VALUES($1,$2,$3) ON CONFLICT DO NOTHING",
-            message.from_user.id, data["start_date"], length
-        )
-        await state.clear()
-        await message.answer("Цикл сохранён! Напомню за 3 дня до следующего.", reply_markup=kb_health())
-    except:
-        await message.answer("Введи число дней, например: 28")
-
-# Pills
-@dp.callback_query(F.data == "health_pills")
-async def cb_pills(cq: CallbackQuery):
-    pills = await db.fetch("SELECT * FROM pills WHERE user_id=$1 AND is_active=TRUE", cq.from_user.id)
-    kb = InlineKeyboardMarkup(inline_keyboard=[])
-    for p in pills:
-        kb.inline_keyboard.append([
-            InlineKeyboardButton(text=f"💊 {p['name']} в {p['remind_time']}", callback_data=f"pill_del_{p['id']}")
-        ])
-    kb.inline_keyboard.append([InlineKeyboardButton(text="➕ Добавить таблетку", callback_data="pill_add")])
-    kb.inline_keyboard.append([InlineKeyboardButton(text="◀️ Назад", callback_data="diary_health")])
-    text = "Таблетки (нажми чтобы удалить):" if pills else "Таблеток нет. Добавь первую!"
-    await cq.message.edit_text(text, reply_markup=kb)
-    await cq.answer()
-
-@dp.callback_query(F.data == "pill_add")
-async def cb_pill_add(cq: CallbackQuery, state: FSMContext):
-    await cq.message.edit_text("Название таблетки:")
-    await state.set_state(States.pill_name)
-    await cq.answer()
-
-@dp.message(States.pill_name)
-async def pill_name_handler(message: Message, state: FSMContext):
-    await state.update_data(pill_name=message.text)
-    await message.answer("Время напоминания (например: 09:00):")
-    await state.set_state(States.pill_time)
-
-@dp.message(States.pill_time)
-async def pill_time_handler(message: Message, state: FSMContext):
-    data = await state.get_data()
-    await db.execute(
-        "INSERT INTO pills(user_id, name, remind_time) VALUES($1,$2,$3)",
-        message.from_user.id, data["pill_name"], message.text.strip()
-    )
-    await state.clear()
-    await message.answer(f"Таблетка '{data['pill_name']}' добавлена. Буду напоминать в {message.text}.", reply_markup=kb_health())
-
-@dp.callback_query(F.data.startswith("pill_del_"))
-async def cb_pill_del(cq: CallbackQuery):
-    pid = int(cq.data.split("_")[2])
-    await db.execute("UPDATE pills SET is_active=FALSE WHERE id=$1", pid)
-    await cq.answer("Удалено!")
-    await cb_pills(cq)
-
-@dp.callback_query(F.data.startswith("pill_taken_"))
-async def cb_pill_taken(cq: CallbackQuery):
-    name = cq.data.replace("pill_taken_", "")
-    await cq.answer(f"Хорошо, {name} отмечено!")
-    await cq.message.edit_reply_markup(reply_markup=None)
-
-@dp.callback_query(F.data.startswith("pill_later_"))
-async def cb_pill_later(cq: CallbackQuery):
-    name = cq.data.replace("pill_later_", "")
-    uid = cq.from_user.id
-    remind_at = datetime.now() + timedelta(minutes=30)
-    await schedule_reminder(uid, f"Напоминание: прими таблетку {name}", remind_at)
-    await cq.answer(f"Напомню через 30 минут!")
-    await cq.message.edit_reply_markup(reply_markup=None)
-
-# Stress
-@dp.callback_query(F.data == "health_stress")
-async def cb_stress(cq: CallbackQuery, state: FSMContext):
-    kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text=str(i), callback_data=f"stress_{i}") for i in range(1, 6)],
-        [InlineKeyboardButton(text=str(i), callback_data=f"stress_{i}") for i in range(6, 11)],
-        [InlineKeyboardButton(text="◀️ Назад", callback_data="diary_health")],
-    ])
-    await cq.message.edit_text("Оцени уровень стресса сегодня (1 — спокойно, 10 — очень стрессово):", reply_markup=kb)
-    await cq.answer()
-
-@dp.callback_query(F.data.startswith("stress_"))
-async def cb_stress_score(cq: CallbackQuery):
-    score = int(cq.data.split("_")[1])
-    today = datetime.now().date()
-    await db.execute(
-        "INSERT INTO stress_log(user_id, score, log_date) VALUES($1,$2,$3)",
-        cq.from_user.id, score, today
-    )
-    tips = {
-        range(1, 4):  "Отлично! Ты в отличной форме.",
-        range(4, 7):  "Умеренный стресс — попробуй сделать перерыв и подышать.",
-        range(7, 11): "Высокий стресс. Рекомендую: глубокое дыхание, прогулка, отдых.",
-    }
-    tip = "Записала."
-    for r, t in tips.items():
-        if score in r:
-            tip = t
-            break
-    await cq.message.edit_text(f"Стресс: {score}/10. {tip}", reply_markup=kb_back("diary_health"))
-    await cq.answer()
-
-# ─── Goals ────────────────────────────────────────────────────────────────────
-def kb_goals():
-    return InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text="➕ Добавить цель", callback_data="goal_add")],
-        [InlineKeyboardButton(text="📋 Мои цели", callback_data="goals_list")],
-        [InlineKeyboardButton(text="◀️ Назад", callback_data="menu_diary")],
-    ])
-
-@dp.callback_query(F.data == "diary_goals")
-async def cb_goals(cq: CallbackQuery):
-    await cq.message.edit_text("Цели:", reply_markup=kb_goals())
-    await cq.answer()
-
-@dp.callback_query(F.data == "goals_list")
-async def cb_goals_list(cq: CallbackQuery):
-    goals = await db.fetch("SELECT * FROM goals WHERE user_id=$1 AND is_done=FALSE ORDER BY created_at DESC", cq.from_user.id)
-    if not goals:
-        await cq.message.edit_text("Целей пока нет. Добавь первую!", reply_markup=kb_goals())
-        await cq.answer()
+async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    query = update.callback_query
+    await query.answer()
+    user_id = query.from_user.id
+    user = await get_user(user_id)
+    if not user:
         return
-    kb = InlineKeyboardMarkup(inline_keyboard=[])
-    for g in goals:
-        bar = "█" * (g["progress"] // 10) + "░" * (10 - g["progress"] // 10)
-        kb.inline_keyboard.append([
-            InlineKeyboardButton(text=f"{g['title']} [{bar}] {g['progress']}%", callback_data=f"goal_update_{g['id']}")
-        ])
-    kb.inline_keyboard.append([InlineKeyboardButton(text="◀️ Назад", callback_data="diary_goals")])
-    await cq.message.edit_text("Мои цели:", reply_markup=kb)
-    await cq.answer()
+    name = user["name"]
+    city = user.get("city") or "Москва"
+    lang = user.get("language", "ru")
+    ru = lang == "ru"
 
-@dp.callback_query(F.data == "goal_add")
-async def cb_goal_add(cq: CallbackQuery, state: FSMContext):
-    await cq.message.edit_text("Название цели:")
-    await state.set_state(States.goal_title)
-    await cq.answer()
+    if query.data == "menu_morning":
+        keyboard = [
+            [InlineKeyboardButton("📋 План на день" if ru else "📋 Day plan", callback_data="morning_plan")],
+            [InlineKeyboardButton("🌤 Погода сейчас" if ru else "🌤 Weather now", callback_data="morning_weather_btn")],
+            [InlineKeyboardButton("🕐 Почасовой прогноз" if ru else "🕐 Hourly forecast", callback_data="morning_hourly")],
+            [InlineKeyboardButton("🌦 Прогноз на неделю" if ru else "🌦 Weekly forecast", callback_data="morning_forecast")],
+            [InlineKeyboardButton("🧘 Мотивация" if ru else "🧘 Motivation", callback_data="morning_motivation")],
+            [InlineKeyboardButton("◀️ Назад" if ru else "◀️ Back", callback_data="back_main")],
+        ]
+        await query.edit_message_text("Утреннее меню" if ru else "Morning menu", reply_markup=InlineKeyboardMarkup(keyboard))
 
-@dp.message(States.goal_title)
-async def goal_title_handler(message: Message, state: FSMContext):
-    await state.update_data(goal_title=message.text)
-    await message.answer("Описание цели (или /skip):")
-    await state.set_state(States.goal_description)
-
-@dp.message(States.goal_description)
-async def goal_description_handler(message: Message, state: FSMContext):
-    data = await state.get_data()
-    desc = "" if message.text == "/skip" else message.text
-    await db.execute(
-        "INSERT INTO goals(user_id, title, description) VALUES($1,$2,$3)",
-        message.from_user.id, data["goal_title"], desc
-    )
-    await state.clear()
-    await message.answer(f"Цель '{data['goal_title']}' добавлена! Буду периодически спрашивать о прогрессе.", reply_markup=kb_goals())
-
-@dp.callback_query(F.data.startswith("goal_update_"))
-async def cb_goal_update(cq: CallbackQuery, state: FSMContext):
-    gid = int(cq.data.split("_")[2])
-    await state.update_data(goal_id=gid)
-    kb = InlineKeyboardMarkup(inline_keyboard=[
-        [InlineKeyboardButton(text=f"{p}%", callback_data=f"goal_progress_{gid}_{p}") for p in [25, 50, 75]],
-        [InlineKeyboardButton(text="100% (Выполнено!)", callback_data=f"goal_progress_{gid}_100")],
-        [InlineKeyboardButton(text="◀️ Назад", callback_data="goals_list")],
-    ])
-    await cq.message.edit_text("Укажи прогресс:", reply_markup=kb)
-    await cq.answer()
-
-@dp.callback_query(F.data.startswith("goal_progress_"))
-async def cb_goal_progress(cq: CallbackQuery):
-    parts = cq.data.split("_")
-    gid, progress = int(parts[2]), int(parts[3])
-    is_done = progress == 100
-    await db.execute("UPDATE goals SET progress=$1, is_done=$2 WHERE id=$3", progress, is_done, gid)
-    if is_done:
-        await cq.message.edit_text("Поздравляю! Цель достигнута! Ты молодец!", reply_markup=kb_goals())
-    else:
-        await cq.message.edit_text(f"Прогресс обновлён: {progress}%! Продолжай в том же духе!", reply_markup=kb_goals())
-    await cq.answer()
-
-# ─── Voice messages ───────────────────────────────────────────────────────────
-@dp.message(F.voice)
-async def handle_voice(message: Message):
-    await ensure_user(message.from_user.id)
-    if not ASSEMBLY_KEY:
-        await message.answer("Голосовые сообщения не настроены.")
-        return
-    file = await bot.get_file(message.voice.file_id)
-    file_bytes = await bot.download_file(file.file_path)
-    text = await transcribe_voice(file_bytes.read())
-    if not text:
-        await message.answer("Не смогла распознать голосовое сообщение. Попробуй ещё раз.")
-        return
-    await message.answer(f"Ты сказала: {text}")
-    reply = await ai_chat(message.from_user.id, text)
-    await message.answer(reply)
-    if message.from_user.id != ADMIN_ID:
-        await bot.send_message(ADMIN_ID, f"[Голос от {message.from_user.id}]\n{text}\n---\n{reply}")
-
-# ─── Photo analysis ───────────────────────────────────────────────────────────
-@dp.message(F.photo)
-async def handle_photo(message: Message):
-    await ensure_user(message.from_user.id)
-    caption = message.caption or "Опиши что на этом фото"
-    photo = message.photo[-1]
-    file = await bot.get_file(photo.file_id)
-    file_bytes = await bot.download_file(file.file_path)
-    b64 = base64.b64encode(file_bytes.read()).decode()
-    try:
-        async with aiohttp.ClientSession() as session:
-            async with session.post(
-                f"{OPENAI_BASE}chat/completions",
-                headers={"Authorization": f"Bearer {OPENAI_KEY}", "Content-Type": "application/json"},
-                json={
-                    "model": MODEL,
-                    "messages": [{
-                        "role": "user",
-                        "content": [
-                            {"type": "image_url", "image_url": {"url": f"data:image/jpeg;base64,{b64}"}},
-                            {"type": "text", "text": caption}
-                        ]
-                    }],
-                    "max_tokens": 500
-                },
-                timeout=aiohttp.ClientTimeout(total=30)
-            ) as resp:
-                data = await resp.json()
-                reply = data["choices"][0]["message"]["content"].strip()
-                reply = reply.replace("**", "").replace("*", "").replace("`", "")
-    except Exception as e:
-        reply = "Не могу проанализировать фото."
-    await message.answer(reply)
-
-# ─── Main text handler ────────────────────────────────────────────────────────
-WEATHER_KEYWORDS = ["погода", "weather", "температура", "дождь", "снег", "солнце", "облачно", "ветер"]
-
-@dp.message(F.text)
-async def handle_text(message: Message, state: FSMContext):
-    # Don't handle commands
-    if message.text.startswith("/"):
-        return
-
-    await ensure_user(message.from_user.id, message.from_user.username or "", message.from_user.first_name or "")
-    user = await get_user(message.from_user.id)
-    text_lower = message.text.lower()
-
-    # Weather shortcut
-    if any(kw in text_lower for kw in WEATHER_KEYWORDS):
-        city = user["city"] if user else "Москва"
-        mode = "now"
-        if "завтра" in text_lower or "tomorrow" in text_lower:
-            mode = "hourly"
-        elif "неделю" in text_lower or "week" in text_lower:
-            mode = "week"
-        weather = await get_weather(city, mode)
-        await message.answer(weather)
-        return
-
-    # Image generation
-    if any(kw in text_lower for kw in ["нарисуй", "сгенерируй картинку", "создай изображение", "draw", "generate image"]):
-        await message.answer("Генерирую изображение...")
-        img_bytes = await generate_image(message.text)
-        if img_bytes:
-            await message.answer_photo(BufferedInputFile(img_bytes, filename="image.png"))
+    elif query.data == "morning_plan":
+        reminders = await get_reminders(user_id)
+        back = InlineKeyboardButton("◀️ Назад" if ru else "◀️ Back", callback_data="menu_morning")
+        if reminders:
+            plan = "\n".join([f"{r['time']} — {r['text']}" for r in sorted(reminders, key=lambda x: x["time"])])
+            text = f"{'Ваш план на сегодня' if ru else 'Your plan for today'}:\n\n{plan}"
         else:
-            await message.answer("Не удалось создать изображение.")
-        return
+            text = t(lang, "no_plan")
+        await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup([[back]]))
 
-    # Reminder shortcut
-    if any(kw in text_lower for kw in ["напомни", "remind me", "напоминание"]):
-        remind_at = await parse_reminder_time(message.text)
-        if remind_at:
-            clean_text = message.text
-            await schedule_reminder(message.from_user.id, clean_text, remind_at)
-            await message.answer(f"Напомню: {clean_text}\nВремя: {remind_at.strftime('%d.%m.%Y в %H:%M')}")
+    elif query.data == "morning_weather_btn":
+        await query.edit_message_text("Получаю погоду..." if ru else "Getting weather...")
+        weather = await get_weather(city, lang)
+        back = InlineKeyboardButton("◀️ Назад" if ru else "◀️ Back", callback_data="menu_morning")
+        await query.edit_message_text(weather, reply_markup=InlineKeyboardMarkup([[back]]))
+
+    elif query.data == "morning_hourly":
+        await query.edit_message_text("Получаю почасовой прогноз..." if ru else "Getting hourly forecast...")
+        hourly = await get_weather_hourly(city, lang)
+        back = InlineKeyboardButton("◀️ Назад" if ru else "◀️ Back", callback_data="menu_morning")
+        text = hourly if hourly else ("Прогноз недоступен." if ru else "Forecast unavailable.")
+        await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup([[back]]))
+
+    elif query.data == "morning_forecast":
+        await query.edit_message_text("Получаю прогноз на неделю..." if ru else "Getting weekly forecast...")
+        forecast = await get_weather_forecast(city, lang)
+        back = InlineKeyboardButton("◀️ Назад" if ru else "◀️ Back", callback_data="menu_morning")
+        text = forecast if forecast else ("Прогноз недоступен." if ru else "Forecast unavailable.")
+        await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup([[back]]))
+
+    elif query.data == "morning_motivation":
+        quote = random.choice(MOTIVATIONAL_QUOTES[lang])
+        keyboard = [[InlineKeyboardButton("🔄 Ещё" if ru else "🔄 Another", callback_data="morning_motivation")], [InlineKeyboardButton("◀️ Назад" if ru else "◀️ Back", callback_data="menu_morning")]]
+        await query.edit_message_text(f"{'Мотивация дня' if ru else 'Motivation'}:\n\n{quote}", reply_markup=InlineKeyboardMarkup(keyboard))
+
+    elif query.data == "menu_interesting":
+        keyboard = [
+            [InlineKeyboardButton("🔬 Научные открытия" if ru else "🔬 Science Discoveries", callback_data="interesting_science")],
+            [InlineKeyboardButton("💻 Технологии и ИИ" if ru else "💻 Technology & AI", callback_data="interesting_technology")],
+            [InlineKeyboardButton("💚 Здоровье и долголетие" if ru else "💚 Health & Wellness", callback_data="interesting_health")],
+            [InlineKeyboardButton("✨ Вдохновляющие истории" if ru else "✨ Inspiring Stories", callback_data="interesting_inspiration")],
+            [InlineKeyboardButton("◀️ Назад" if ru else "◀️ Back", callback_data="back_main")],
+        ]
+        await query.edit_message_text("Интересное — выберите тему:" if ru else "Interesting — choose a topic:", reply_markup=InlineKeyboardMarkup(keyboard))
+
+    elif query.data.startswith("interesting_"):
+        category = query.data.replace("interesting_", "")
+        cat_info = INTERESTING_QUERIES.get(category, {})
+        title = cat_info.get("ru" if ru else "en", "Интересное")
+        await query.edit_message_text(f"Загружаю {title}..." if ru else f"Loading {title}...")
+        # Очищаем кэш для свежей загрузки
+        context.user_data.pop(f"interesting_articles_{category}", None)
+        context.user_data.pop(f"interesting_translated_{category}", None)
+        articles = await fetch_articles(cat_info.get("query", "interesting news"), 10)
+        if not articles:
+            back = InlineKeyboardButton("◀️ Назад" if ru else "◀️ Back", callback_data="menu_interesting")
+            await query.edit_message_text("Материалы временно недоступны." if ru else "Content temporarily unavailable.", reply_markup=InlineKeyboardMarkup([[back]]))
+            return
+        titles = [a["title"] for a in articles]
+        translated = await translate_titles(titles, lang)
+        context.user_data[f"interesting_articles_{category}"] = articles
+        context.user_data[f"interesting_translated_{category}"] = translated
+        lines = [f"{i+1}. {t}" for i, t in enumerate(translated)]
+        text = f"{title}\n\n" + "\n".join(lines)
+        text += "\n\nНапишите цифру чтобы узнать подробнее" if ru else "\n\nType a number to read more"
+        context.user_data["waiting_interesting"] = category
+        keyboard = [
+            [InlineKeyboardButton("🔄 Обновить" if ru else "🔄 Refresh", callback_data=f"interesting_{category}")],
+            [InlineKeyboardButton("◀️ Назад" if ru else "◀️ Back", callback_data="menu_interesting")],
+        ]
+        await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard))
+
+    elif query.data == "menu_shopping":
+        async with db_pool.acquire() as conn:
+            items = await conn.fetch("SELECT id, item, done FROM shopping_list WHERE user_id = $1 ORDER BY created_at", user_id)
+        if items:
+            lines = [f"{'✅' if i['done'] else '⬜'} {i['item']}" for i in items]
+            text = ("Список покупок:\n\n" if ru else "Shopping list:\n\n") + "\n".join(lines)
+        else:
+            text = "Список покупок пуст.\n\nНапишите что добавить!" if ru else "Shopping list is empty.\n\nWrite what to add!"
+        context.user_data["waiting_shopping"] = True
+        keyboard = [
+            [InlineKeyboardButton("🗑 Очистить" if ru else "🗑 Clear", callback_data="shopping_clear")],
+            [InlineKeyboardButton("◀️ Назад" if ru else "◀️ Back", callback_data="back_main")],
+        ]
+        await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard))
+
+    elif query.data == "shopping_clear":
+        async with db_pool.acquire() as conn:
+            await conn.execute("DELETE FROM shopping_list WHERE user_id = $1", user_id)
+        back = InlineKeyboardButton("◀️ Назад" if ru else "◀️ Back", callback_data="menu_shopping")
+        await query.edit_message_text("Список покупок очищен!" if ru else "Shopping list cleared!", reply_markup=InlineKeyboardMarkup([[back]]))
+
+    elif query.data == "menu_habits":
+        async with db_pool.acquire() as conn:
+            habits = await conn.fetch("SELECT id, name FROM habits WHERE user_id = $1", user_id)
+        text = ("Ваши привычки:\n\n" if ru else "Your habits:\n\n") + "\n".join([f"✅ {h['name']}" for h in habits]) if habits else ("Привычек пока нет." if ru else "No habits yet.")
+        keyboard = [
+            [InlineKeyboardButton("➕ Добавить" if ru else "➕ Add", callback_data="habit_add")],
+            [InlineKeyboardButton("✅ Отметить" if ru else "✅ Mark done", callback_data="habit_log")],
+            [InlineKeyboardButton("📊 Статистика" if ru else "📊 Statistics", callback_data="habit_stats")],
+            [InlineKeyboardButton("◀️ Назад" if ru else "◀️ Back", callback_data="back_main")],
+        ]
+        await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard))
+
+    elif query.data == "habit_add":
+        context.user_data["waiting_habit"] = True
+        back = InlineKeyboardButton("◀️ Отмена" if ru else "◀️ Cancel", callback_data="menu_habits")
+        await query.edit_message_text("Напишите название привычки\n\nНапример: Медитация, Чтение, Зарядка" if ru else "Write the habit name", reply_markup=InlineKeyboardMarkup([[back]]))
+
+    elif query.data == "habit_log":
+        async with db_pool.acquire() as conn:
+            habits = await conn.fetch("SELECT id, name FROM habits WHERE user_id = $1", user_id)
+        if not habits:
+            back = InlineKeyboardButton("◀️ Назад" if ru else "◀️ Back", callback_data="menu_habits")
+            await query.edit_message_text("Сначала добавьте привычку!" if ru else "Add a habit first!", reply_markup=InlineKeyboardMarkup([[back]]))
+            return
+        keyboard = [[InlineKeyboardButton(f"✅ {h['name']}", callback_data=f"log_habit_{h['id']}")] for h in habits]
+        keyboard.append([InlineKeyboardButton("◀️ Назад" if ru else "◀️ Back", callback_data="menu_habits")])
+        await query.edit_message_text("Какую привычку отмечаем?" if ru else "Which habit to mark?", reply_markup=InlineKeyboardMarkup(keyboard))
+
+    elif query.data.startswith("log_habit_"):
+        habit_id = int(query.data.split("_")[-1])
+        async with db_pool.acquire() as conn:
+            habit = await conn.fetchrow("SELECT name FROM habits WHERE id = $1", habit_id)
+            await conn.execute("INSERT INTO habit_logs (user_id, habit_id) VALUES ($1, $2)", user_id, habit_id)
+        back = InlineKeyboardButton("◀️ Назад" if ru else "◀️ Back", callback_data="menu_habits")
+        await query.edit_message_text(f"Привычка {habit['name']} отмечена! 💪" if ru else f"Habit {habit['name']} marked! 💪", reply_markup=InlineKeyboardMarkup([[back]]))
+
+    elif query.data == "habit_stats":
+        async with db_pool.acquire() as conn:
+            habits = await conn.fetch("SELECT id, name FROM habits WHERE user_id = $1", user_id)
+            lines = []
+            for h in habits:
+                count = await conn.fetchval("SELECT COUNT(*) FROM habit_logs WHERE habit_id = $1 AND logged_at >= NOW() - INTERVAL '7 days'", h["id"])
+                lines.append(f"{h['name']}: {count}/7 {'дней' if ru else 'days'}")
+        text = ("Статистика за 7 дней:\n\n" if ru else "Stats for 7 days:\n\n") + "\n".join(lines) if lines else ("Нет данных." if ru else "No data.")
+        back = InlineKeyboardButton("◀️ Назад" if ru else "◀️ Back", callback_data="menu_habits")
+        await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup([[back]]))
+
+    elif query.data == "menu_water":
+        water_on = user.get("water_reminders", False)
+        interval = user.get("water_interval", 2)
+        status = ("✅ Включены" if water_on else "❌ Выключены") if ru else ("✅ On" if water_on else "❌ Off")
+        keyboard = [
+            [InlineKeyboardButton("💧 Выпила воду!" if ru else "💧 Drank water!", callback_data="water_drink")],
+            [InlineKeyboardButton(("🔔 Выключить" if water_on else "🔔 Включить") if ru else ("🔔 Turn off" if water_on else "🔔 Turn on"), callback_data="water_toggle")],
+            [InlineKeyboardButton("◀️ Назад" if ru else "◀️ Back", callback_data="back_main")],
+        ]
+        text = f"Трекер воды\n\nНапоминания: {status}\nКаждые {interval} часа\nНорма: 8 стаканов 💧" if ru else f"Water tracker\n\nReminders: {status}\nEvery {interval} hours\nNorm: 8 glasses 💧"
+        await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard))
+
+    elif query.data == "water_drink":
+        back = InlineKeyboardButton("◀️ Назад" if ru else "◀️ Back", callback_data="menu_water")
+        await query.edit_message_text("Стакан воды засчитан! 💧" if ru else "Glass of water counted! 💧", reply_markup=InlineKeyboardMarkup([[back]]))
+
+    elif query.data == "water_toggle":
+        water_on = user.get("water_reminders", False)
+        new_state = not water_on
+        await save_user(user_id, water_reminders=new_state)
+        if new_state:
+            interval = user.get("water_interval", 2)
+            context.application.job_queue.run_repeating(send_water_reminder, interval=interval * 3600, first=interval * 3600, data=user_id, name=f"water_{user_id}")
+            text = f"Напоминания включены! Каждые {interval} часа 💧" if ru else f"Water reminders on! Every {interval} hours 💧"
+        else:
+            for job in context.application.job_queue.get_jobs_by_name(f"water_{user_id}"):
+                job.schedule_removal()
+            text = "Напоминания выключены." if ru else "Water reminders off."
+        back = InlineKeyboardButton("◀️ Назад" if ru else "◀️ Back", callback_data="menu_water")
+        await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup([[back]]))
+
+    elif query.data == "menu_diary":
+        keyboard = [
+            [InlineKeyboardButton("💰 Финансы" if ru else "💰 Finances", callback_data="diary_finances"), InlineKeyboardButton("😴 Сон" if ru else "😴 Sleep", callback_data="diary_sleep")],
+            [InlineKeyboardButton("📝 Заметки" if ru else "📝 Notes", callback_data="diary_notes"), InlineKeyboardButton("🍳 Рецепты" if ru else "🍳 Recipes", callback_data="diary_recipe")],
+            [InlineKeyboardButton("🎬 Что посмотреть" if ru else "🎬 What to watch", callback_data="diary_movie")],
+            [InlineKeyboardButton("◀️ Назад" if ru else "◀️ Back", callback_data="back_main")],
+        ]
+        await query.edit_message_text("Дневник — выберите раздел:" if ru else "Diary — choose a section:", reply_markup=InlineKeyboardMarkup(keyboard))
+
+    elif query.data == "diary_finances":
+        async with db_pool.acquire() as conn:
+            income = await conn.fetchval("SELECT SUM(amount) FROM finances WHERE user_id = $1 AND type = 'income' AND created_at >= NOW() - INTERVAL '30 days'", user_id)
+            expense = await conn.fetchval("SELECT SUM(amount) FROM finances WHERE user_id = $1 AND type = 'expense' AND created_at >= NOW() - INTERVAL '30 days'", user_id)
+            recent = await conn.fetch("SELECT amount, type, category, description FROM finances WHERE user_id = $1 ORDER BY created_at DESC LIMIT 5", user_id)
+        balance = (income or 0) - (expense or 0)
+        lines = [f"{'➕' if r['type'] == 'income' else '➖'} {r['amount']:.0f} — {r['category']} {r['description']}" for r in recent]
+        if ru:
+            text = f"Финансы за месяц:\n\n➕ Доходы: {income or 0:.0f}\n➖ Расходы: {expense or 0:.0f}\n💵 Баланс: {balance:.0f}\n\n"
+            text += "\n".join(lines) if lines else "Записей пока нет."
+            text += "\n\nДобавить доход: +1000 зарплата\nДобавить расход: -500 еда кофе"
+        else:
+            text = f"Finances this month:\n\n➕ Income: {income or 0:.0f}\n➖ Expenses: {expense or 0:.0f}\n💵 Balance: {balance:.0f}\n\n"
+            text += "\n".join(lines) if lines else "No records yet."
+            text += "\n\nAdd income: +1000 salary\nAdd expense: -500 food coffee"
+        context.user_data["waiting_finance"] = True
+        back = InlineKeyboardButton("◀️ Назад" if ru else "◀️ Back", callback_data="menu_diary")
+        await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup([[back]]))
+
+    elif query.data == "diary_sleep":
+        keyboard = [
+            [InlineKeyboardButton("6:00", callback_data="sleep_6_0"), InlineKeyboardButton("7:00", callback_data="sleep_7_0"), InlineKeyboardButton("8:00", callback_data="sleep_8_0")],
+            [InlineKeyboardButton("9:00", callback_data="sleep_9_0"), InlineKeyboardButton("10:00", callback_data="sleep_10_0")],
+            [InlineKeyboardButton("◀️ Назад" if ru else "◀️ Back", callback_data="menu_diary")],
+        ]
+        await query.edit_message_text("Во сколько хотите проснуться?" if ru else "What time do you want to wake up?", reply_markup=InlineKeyboardMarkup(keyboard))
+
+    elif query.data.startswith("sleep_"):
+        parts = query.data.split("_")
+        wh, wm = int(parts[1]), int(parts[2])
+        times = calculate_sleep_times(wh, wm)
+        text = f"Чтобы проснуться в {wh:02d}:{wm:02d} бодрой, ложитесь в:\n\n" if ru else f"To wake up at {wh:02d}:{wm:02d} refreshed, go to bed at:\n\n"
+        for ti in times:
+            text += f"🌙 {ti}\n"
+        text += "\n+15 минут на засыпание учтены" if ru else "\n+15 min to fall asleep included"
+        back = InlineKeyboardButton("◀️ Назад" if ru else "◀️ Back", callback_data="diary_sleep")
+        await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup([[back]]))
+
+    elif query.data == "diary_notes":
+        async with db_pool.acquire() as conn:
+            notes = await conn.fetch("SELECT text FROM notes WHERE user_id = $1 ORDER BY created_at DESC LIMIT 5", user_id)
+        if notes:
+            lines = [f"• {n['text'][:60]}{'...' if len(n['text']) > 60 else ''}" for n in notes]
+            text = ("Ваши заметки:\n\n" if ru else "Your notes:\n\n") + "\n".join(lines)
+        else:
+            text = "Заметок пока нет." if ru else "No notes yet."
+        text += "\n\nНапишите что угодно и я сохраню!" if ru else "\n\nWrite anything and I will save it!"
+        context.user_data["waiting_note"] = True
+        back = InlineKeyboardButton("◀️ Назад" if ru else "◀️ Back", callback_data="menu_diary")
+        await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup([[back]]))
+
+    elif query.data == "diary_recipe":
+        await query.edit_message_text("Подбираю рецепт..." if ru else "Finding a recipe...")
+        recipe = await get_ai_recipe(lang)
+        keyboard = [[InlineKeyboardButton("🔄 Другой" if ru else "🔄 Another", callback_data="diary_recipe")], [InlineKeyboardButton("◀️ Назад" if ru else "◀️ Back", callback_data="menu_diary")]]
+        await query.edit_message_text(f"Рецепт дня:\n\n{recipe}" if ru else f"Recipe of the day:\n\n{recipe}", reply_markup=InlineKeyboardMarkup(keyboard))
+
+    elif query.data == "diary_movie":
+        await query.edit_message_text("Подбираю фильм..." if ru else "Finding a movie...")
+        movie = await get_ai_movie(lang)
+        keyboard = [[InlineKeyboardButton("🔄 Другой" if ru else "🔄 Another", callback_data="diary_movie")], [InlineKeyboardButton("◀️ Назад" if ru else "◀️ Back", callback_data="menu_diary")]]
+        await query.edit_message_text(f"Рекомендация:\n\n{movie}" if ru else f"Recommendation:\n\n{movie}", reply_markup=InlineKeyboardMarkup(keyboard))
+
+    elif query.data == "menu_profile":
+        async with db_pool.acquire() as conn:
+            total_msg = await conn.fetchval("SELECT COUNT(*) FROM history WHERE user_id = $1 AND role = 'user'", user_id)
+            habits_count = await conn.fetchval("SELECT COUNT(*) FROM habits WHERE user_id = $1", user_id)
+            income = await conn.fetchval("SELECT SUM(amount) FROM finances WHERE user_id = $1 AND type = 'income' AND created_at >= NOW() - INTERVAL '30 days'", user_id)
+            expense = await conn.fetchval("SELECT SUM(amount) FROM finances WHERE user_id = $1 AND type = 'expense' AND created_at >= NOW() - INTERVAL '30 days'", user_id)
+        created = user.get("created_at")
+        days = (datetime.now() - created).days if created else 0
+        tz = user.get("timezone") or "Europe/Moscow"
+        balance = (income or 0) - (expense or 0)
+        comm = user.get("comm_style", "наставник")
+        if ru:
+            text = f"Мой профиль\n\nИмя: {name}\nГород: {city}\nЧасовой пояс: {tz}\nЯзык: Русский 🇷🇺\nСтиль общения: {comm}\nДней с нами: {days}\nСообщений: {total_msg}\nПривычек: {habits_count}\nБаланс за месяц: {balance:.0f}"
+            keyboard = [
+                [InlineKeyboardButton("🌍 Изменить город", callback_data="profile_city")],
+                [InlineKeyboardButton("💬 Сменить стиль общения", callback_data="change_comm_style")],
+                [InlineKeyboardButton("🌐 Switch to English 🇬🇧", callback_data="switch_lang_en")],
+                [InlineKeyboardButton("🗑 Забудь всё обо мне", callback_data="confirm_forget")],
+                [InlineKeyboardButton("◀️ Назад", callback_data="back_main")],
+            ]
+        else:
+            text = f"My profile\n\nName: {name}\nCity: {city}\nTimezone: {tz}\nLanguage: English 🇬🇧\nCommunication style: {comm}\nDays with us: {days}\nMessages: {total_msg}\nHabits: {habits_count}\nBalance this month: {balance:.0f}"
+            keyboard = [
+                [InlineKeyboardButton("🌍 Change city", callback_data="profile_city")],
+                [InlineKeyboardButton("💬 Change communication style", callback_data="change_comm_style")],
+                [InlineKeyboardButton("🌐 Switch to Russian 🇷🇺", callback_data="switch_lang_ru")],
+                [InlineKeyboardButton("🗑 Forget everything about me", callback_data="confirm_forget")],
+                [InlineKeyboardButton("◀️ Back", callback_data="back_main")],
+            ]
+        await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard))
+
+    elif query.data == "change_comm_style":
+        if ru:
+            keyboard = [
+                [InlineKeyboardButton("👭 Подружка — на ты, тепло", callback_data="set_style_подружка")],
+                [InlineKeyboardButton("🎯 Наставник — на вы, мотивирующий", callback_data="set_style_наставник")],
+                [InlineKeyboardButton("💼 Профессионал — чётко и по делу", callback_data="set_style_профессионал")],
+                [InlineKeyboardButton("◀️ Назад", callback_data="menu_profile")],
+            ]
+            await query.edit_message_text("Выберите стиль общения:", reply_markup=InlineKeyboardMarkup(keyboard))
+        else:
+            keyboard = [
+                [InlineKeyboardButton("👭 Friend — casual, informal", callback_data="set_style_friend")],
+                [InlineKeyboardButton("🎯 Mentor — motivating, formal", callback_data="set_style_mentor")],
+                [InlineKeyboardButton("💼 Professional — clear, concise", callback_data="set_style_professional")],
+                [InlineKeyboardButton("◀️ Back", callback_data="menu_profile")],
+            ]
+            await query.edit_message_text("Choose communication style:", reply_markup=InlineKeyboardMarkup(keyboard))
+
+    elif query.data.startswith("set_style_"):
+        style = query.data.replace("set_style_", "")
+        await save_user(user_id, comm_style=style)
+        await save_memory_item(user_id, "стиль_общения", style)
+        back = InlineKeyboardButton("◀️ Назад" if ru else "◀️ Back", callback_data="menu_profile")
+        style_names = {"подружка": "Подружка 👭", "наставник": "Наставник 🎯", "профессионал": "Профессионал 💼", "friend": "Friend 👭", "mentor": "Mentor 🎯", "professional": "Professional 💼"}
+        style_name = style_names.get(style, style)
+        text = f"Стиль общения изменён: {style_name}" if ru else f"Communication style changed: {style_name}"
+        await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup([[back]]))
+
+    elif query.data == "confirm_forget":
+        keyboard = [
+            [InlineKeyboardButton("🗑 Да, удалить всё" if ru else "🗑 Yes, delete everything", callback_data="do_forget")],
+            [InlineKeyboardButton("❌ Отмена" if ru else "❌ Cancel", callback_data="menu_profile")],
+        ]
+        await query.edit_message_text("Вы уверены? Это удалит всю историю, заметки, напоминания и личные данные." if ru else "Are you sure? This will delete all history, notes, reminders and personal data.", reply_markup=InlineKeyboardMarkup(keyboard))
+
+    elif query.data == "do_forget":
+        async with db_pool.acquire() as conn:
+            for tbl in ["history", "reminders", "notes", "habits", "habit_logs", "finances", "user_memory", "sleep_logs", "shopping_list"]:
+                await conn.execute(f"DELETE FROM {tbl} WHERE user_id = $1", user_id)
+            await conn.execute("UPDATE users SET onboarded = FALSE, name = NULL WHERE user_id = $1", user_id)
+        await query.edit_message_text(t(lang, "memory_cleared"))
+
+    elif query.data == "switch_lang_en":
+        await save_user(user_id, language="en")
+        await query.edit_message_text("Language switched to English 🇬🇧\n\nType /menu to continue!", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("◀️ Back", callback_data="back_main")]]))
+
+    elif query.data == "switch_lang_ru":
+        await save_user(user_id, language="ru")
+        await query.edit_message_text("Язык изменён на русский 🇷🇺\n\nНапишите /menu чтобы продолжить!", reply_markup=InlineKeyboardMarkup([[InlineKeyboardButton("◀️ Назад", callback_data="back_main")]]))
+
+    elif query.data == "profile_city":
+        context.user_data["waiting_city"] = True
+        back = InlineKeyboardButton("◀️ Отмена" if ru else "◀️ Cancel", callback_data="menu_profile")
+        await query.edit_message_text("Напишите название вашего города" if ru else "Write your city name", reply_markup=InlineKeyboardMarkup([[back]]))
+
+    elif query.data == "menu_settings":
+        mw = "✅" if user.get("morning_weather") else "❌"
+        mm = "✅" if user.get("morning_motivation") else "❌"
+        w = "✅" if user.get("water_reminders") else "❌"
+        ev = "✅" if user.get("evening_news") else "❌"
+        if ru:
+            keyboard = [
+                [InlineKeyboardButton(f"{mw} Погода утром", callback_data="toggle_morning_weather")],
+                [InlineKeyboardButton(f"{mm} Мотивация утром", callback_data="toggle_morning_motivation")],
+                [InlineKeyboardButton(f"{w} Напоминания о воде", callback_data="water_toggle")],
+                [InlineKeyboardButton(f"{ev} Вечерняя сводка", callback_data="toggle_evening_news")],
+                [InlineKeyboardButton("◀️ Назад", callback_data="back_main")],
+            ]
+        else:
+            keyboard = [
+                [InlineKeyboardButton(f"{mw} Weather in morning", callback_data="toggle_morning_weather")],
+                [InlineKeyboardButton(f"{mm} Motivation in morning", callback_data="toggle_morning_motivation")],
+                [InlineKeyboardButton(f"{w} Water reminders", callback_data="water_toggle")],
+                [InlineKeyboardButton(f"{ev} Evening summary", callback_data="toggle_evening_news")],
+                [InlineKeyboardButton("◀️ Back", callback_data="back_main")],
+            ]
+        await query.edit_message_text("Настройки" if ru else "Settings", reply_markup=InlineKeyboardMarkup(keyboard))
+
+    elif query.data == "toggle_morning_weather":
+        new = not user.get("morning_weather", False)
+        await save_user(user_id, morning_weather=new)
+        status = ("включена ✅" if new else "выключена ❌") if ru else ("on ✅" if new else "off ❌")
+        back = InlineKeyboardButton("◀️ Назад" if ru else "◀️ Back", callback_data="menu_settings")
+        await query.edit_message_text(f"Погода утром {status}" if ru else f"Morning weather {status}", reply_markup=InlineKeyboardMarkup([[back]]))
+
+    elif query.data == "toggle_morning_motivation":
+        new = not user.get("morning_motivation", False)
+        await save_user(user_id, morning_motivation=new)
+        status = ("включена ✅" if new else "выключена ❌") if ru else ("on ✅" if new else "off ❌")
+        back = InlineKeyboardButton("◀️ Назад" if ru else "◀️ Back", callback_data="menu_settings")
+        await query.edit_message_text(f"Мотивация утром {status}" if ru else f"Morning motivation {status}", reply_markup=InlineKeyboardMarkup([[back]]))
+
+    elif query.data == "toggle_evening_news":
+        new = not user.get("evening_news", False)
+        await save_user(user_id, evening_news=new)
+        if new:
+            evening_time = user.get("evening_time", "21:00")
+            tz = pytz.timezone(user.get("timezone", "Europe/Moscow"))
+            hour = int(evening_time.split(":")[0])
+            context.application.job_queue.run_daily(send_evening_news, time=time(hour=hour, minute=0, tzinfo=tz), data=user_id, name=f"evening_{user_id}")
+            text = f"Вечерняя сводка включена! В {evening_time}" if ru else f"Evening summary on! At {evening_time}"
+        else:
+            for job in context.application.job_queue.get_jobs_by_name(f"evening_{user_id}"):
+                job.schedule_removal()
+            text = "Вечерняя сводка выключена." if ru else "Evening summary off."
+        back = InlineKeyboardButton("◀️ Назад" if ru else "◀️ Back", callback_data="menu_settings")
+        await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup([[back]]))
+
+    elif query.data == "close_menu":
+        await query.edit_message_text("Меню закрыто. Напишите /menu чтобы открыть снова 🌸" if ru else "Menu closed. Type /menu to open again 🌸")
+
+    elif query.data == "back_main":
+        await query.edit_message_text("🌸", reply_markup=get_main_menu(lang))
+
+async def announce(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_user.id != ADMIN_ID:
+        await update.message.reply_text("Нет доступа.")
+        return
+    if not context.args:
+        await update.message.reply_text("Пример: /announce Текст")
+        return
+    text = " ".join(context.args)
+    all_users = await get_all_users()
+    sent = 0
+    failed = 0
+    await update.message.reply_text(f"Рассылка для {len(all_users)} пользователей...")
+    for uid in all_users:
+        try:
+            await context.bot.send_message(chat_id=uid, text=f"📢 {text}")
+            sent += 1
+        except:
+            failed += 1
+    await update.message.reply_text(f"Отправлено: {sent}\nНе доставлено: {failed}")
+
+async def start(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    user_name = update.effective_user.first_name or "Пользователь"
+    username = update.effective_user.username or "нет username"
+    await save_user(user_id, username=username)
+    await update.message.reply_text(t("ru", "welcome"))
+    await notify_admin(context, user_name, username, f"Новый пользователь (ID: {user_id})", "Начал онбординг")
+    return ASK_NAME
+
+async def ask_name(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    name = update.message.text.strip()
+    await save_user(user_id, name=name, username=update.effective_user.username or "")
+    await save_memory_item(user_id, "имя", name)
+    await update.message.reply_text(t("ru", "ask_city", name=name), reply_markup=ReplyKeyboardRemove())
+    return ASK_CITY
+
+async def ask_city(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    city = update.message.text.strip()
+    timezone = await get_timezone_by_city(city)
+    await save_user(user_id, city=city, timezone=timezone)
+    await save_memory_item(user_id, "город", city)
+    keyboard = [["🇷🇺 Русский", "🇬🇧 English"]]
+    await update.message.reply_text(t("ru", "ask_language", city=city), reply_markup=ReplyKeyboardMarkup(keyboard, one_time_keyboard=True, resize_keyboard=True))
+    return ASK_LANGUAGE
+
+async def ask_language(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    lang = "en" if "English" in update.message.text else "ru"
+    await save_user(user_id, language=lang)
+    keyboard = [["✅ Да, каждое утро" if lang == "ru" else "✅ Yes, every morning", "❌ Нет, не нужно" if lang == "ru" else "❌ No, thanks"]]
+    await update.message.reply_text(t(lang, "ask_morning"), reply_markup=ReplyKeyboardMarkup(keyboard, one_time_keyboard=True, resize_keyboard=True))
+    return ASK_MORNING_PLAN
+
+async def ask_morning_plan(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    user = await get_user(user_id)
+    lang = user.get("language", "ru") if user else "ru"
+    wants = "Да" in update.message.text or "Yes" in update.message.text
+    await save_user(user_id, morning_plan=wants)
+    if wants:
+        keyboard = [["7:00", "8:00", "9:00"], ["10:00", "Другое" if lang == "ru" else "Other"]]
+        await update.message.reply_text(t(lang, "ask_morning_time"), reply_markup=ReplyKeyboardMarkup(keyboard, one_time_keyboard=True, resize_keyboard=True))
+        return ASK_MORNING_TIME
+    return await ask_reminders_step(update, context)
+
+async def ask_morning_time(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    try:
+        hour = int(update.message.text.replace(":00", "").replace(":30", ""))
+        morning_time = f"{hour:02d}:00"
+    except:
+        morning_time = "08:00"
+    await save_user(user_id, morning_time=morning_time)
+    return await ask_reminders_step(update, context)
+
+async def ask_reminders_step(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    user = await get_user(user_id)
+    lang = user.get("language", "ru") if user else "ru"
+    keyboard = [["✅ За час", "⏰ За 30 минут", "❌ Не нужно"]] if lang == "ru" else [["✅ 1 hour before", "⏰ 30 minutes before", "❌ No thanks"]]
+    await update.message.reply_text(t(lang, "ask_reminders"), reply_markup=ReplyKeyboardMarkup(keyboard, one_time_keyboard=True, resize_keyboard=True))
+    return ASK_REMINDERS
+
+async def finish_onboarding(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    text = update.message.text
+    user = await get_user(user_id)
+    lang = user.get("language", "ru") if user else "ru"
+    if "час" in text or "1 hour" in text:
+        reminder_before = 60
+    elif "30" in text:
+        reminder_before = 30
+    else:
+        reminder_before = 0
+    await save_user(user_id, reminder_before=reminder_before)
+    return await ask_evening_news_step(update, context)
+
+async def ask_evening_news_step(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    user = await get_user(user_id)
+    lang = user.get("language", "ru") if user else "ru"
+    keyboard = [["✅ Да, вечером", "❌ Не нужно"]] if lang == "ru" else [["✅ Yes, in the evening", "❌ No thanks"]]
+    await update.message.reply_text(t(lang, "ask_evening_news"), reply_markup=ReplyKeyboardMarkup(keyboard, one_time_keyboard=True, resize_keyboard=True))
+    return ASK_EVENING_NEWS
+
+async def handle_evening_news_answer(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    user = await get_user(user_id)
+    lang = user.get("language", "ru") if user else "ru"
+    wants = "Да" in update.message.text or "Yes" in update.message.text
+    await save_user(user_id, evening_news=wants)
+    if wants:
+        keyboard = [["20:00", "21:00", "22:00"], ["19:00", "Другое" if lang == "ru" else "Other"]]
+        await update.message.reply_text(t(lang, "ask_evening_time"), reply_markup=ReplyKeyboardMarkup(keyboard, one_time_keyboard=True, resize_keyboard=True))
+        return ASK_EVENING_TIME
+    return await ask_comm_style_step(update, context)
+
+async def handle_evening_time(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    try:
+        hour = int(update.message.text.replace(":00", "").replace(":30", ""))
+        evening_time = f"{hour:02d}:00"
+    except:
+        evening_time = "21:00"
+    await save_user(user_id, evening_time=evening_time)
+    return await ask_comm_style_step(update, context)
+
+async def ask_comm_style_step(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    user = await get_user(user_id)
+    lang = user.get("language", "ru") if user else "ru"
+    if lang == "en":
+        keyboard = [["👭 Friend — casual, on first name basis"], ["🎯 Mentor — motivating, formal"], ["💼 Professional — clear and concise"], ["✍️ My own style — I'll describe"]]
+        text = "How would you like me to communicate with you?"
+    else:
+        keyboard = [["👭 Подружка — тепло, неформально, на ты"], ["🎯 Наставник — мотивирующий, на вы"], ["💼 Профессионал — чётко и по делу"], ["✍️ Свой стиль — напишу сама"]]
+        text = "Как вам удобнее чтобы я общалась с вами?"
+    await update.message.reply_text(text, reply_markup=ReplyKeyboardMarkup(keyboard, one_time_keyboard=True, resize_keyboard=True))
+    return ASK_COMM_STYLE
+
+async def handle_comm_style(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    user = await get_user(user_id)
+    lang = user.get("language", "ru") if user else "ru"
+    text = update.message.text
+    if "Подружка" in text or "Friend" in text:
+        style = "подружка" if lang == "ru" else "friend"
+    elif "Наставник" in text or "Mentor" in text:
+        style = "наставник" if lang == "ru" else "mentor"
+    elif "Профессионал" in text or "Professional" in text:
+        style = "профессионал" if lang == "ru" else "professional"
+    else:
+        style = text.strip()[:50]
+    await save_user(user_id, comm_style=style)
+    await save_memory_item(user_id, "стиль_общения", style)
+    confirm = f"Отлично, запомнила! Стиль: {style} 🌸" if lang == "ru" else f"Got it! Style: {style} 🌸"
+    await update.message.reply_text(confirm, reply_markup=ReplyKeyboardRemove())
+    return await finish_onboarding_final(update, context)
+
+async def finish_onboarding_final(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    await save_user(user_id, onboarded=True)
+    user = await get_user(user_id)
+    lang = user.get("language", "ru") if user else "ru"
+    name = user["name"] if user else ""
+    morning_time = user["morning_time"] if user else "08:00"
+    has_plan = user["morning_plan"] if user else False
+    has_evening = user.get("evening_news", False)
+    evening_time = user.get("evening_time", "21:00")
+    await update.message.reply_text(t(lang, "finish", name=name), reply_markup=ReplyKeyboardRemove())
+    username = update.effective_user.username or "нет username"
+    await notify_admin(context, name, username, "Завершил онбординг", f"Стиль: {user.get('comm_style', 'н/а')}, Язык: {lang}")
+    if has_plan and morning_time:
+        tz = pytz.timezone(user["timezone"] if user else "Europe/Moscow")
+        context.application.job_queue.run_daily(send_morning_plan, time=time(hour=int(morning_time.split(":")[0]), minute=0, tzinfo=tz), data=user_id, name=f"morning_{user_id}")
+    if has_evening and evening_time:
+        tz = pytz.timezone(user["timezone"] if user else "Europe/Moscow")
+        context.application.job_queue.run_daily(send_evening_news, time=time(hour=int(evening_time.split(":")[0]), minute=0, tzinfo=tz), data=user_id, name=f"evening_{user_id}")
+    return ConversationHandler.END
+
+async def process_text_message(update: Update, context: ContextTypes.DEFAULT_TYPE, user_text: str):
+    user_id = update.effective_user.id
+    user = await get_user(user_id)
+    if not user or not user["onboarded"]:
+        await update.message.reply_text(t("ru", "not_started"))
+        return
+    name = user["name"]
+    lang = user.get("language", "ru")
+    ru = lang == "ru"
+    user_name = update.effective_user.first_name or "Пользователь"
+    username = update.effective_user.username or "нет username"
+
+    # Смена стиля через чат
+    if is_change_style_request(user_text):
+        text_lower = user_text.lower()
+        if "подруж" in text_lower or "friend" in text_lower or "на ты" in text_lower:
+            new_style = "подружка" if ru else "friend"
+        elif "наставник" in text_lower or "mentor" in text_lower or "на вы" in text_lower:
+            new_style = "наставник" if ru else "mentor"
+        elif "профессионал" in text_lower or "professional" in text_lower:
+            new_style = "профессионал" if ru else "professional"
+        else:
+            new_style = None
+        if new_style:
+            await save_user(user_id, comm_style=new_style)
+            await save_memory_item(user_id, "стиль_общения", new_style)
+            reply = f"Стиль изменён на «{new_style}»! Теперь буду общаться именно так 🌸" if ru else f"Style changed to «{new_style}»! I'll communicate that way now 🌸"
+            await update.message.reply_text(reply)
+            await notify_admin(context, user_name, username, user_text, reply)
             return
 
-    # General AI response
-    reply = await ai_chat(message.from_user.id, message.text)
-    await message.answer(reply)
+    if context.user_data.get("waiting_interesting"):
+        category = context.user_data["waiting_interesting"]
+        if user_text.strip().isdigit():
+            idx = int(user_text.strip()) - 1
+            articles = context.user_data.get(f"interesting_articles_{category}", [])
+            translated = context.user_data.get(f"interesting_translated_{category}", [])
+            if 0 <= idx < len(articles):
+                context.user_data["waiting_interesting"] = None
+                await context.bot.send_chat_action(chat_id=update.effective_chat.id, action="typing")
+                title = translated[idx] if idx < len(translated) else articles[idx]["title"]
+                loading = f"Читаю про «{title}»..." if ru else f"Reading about «{title}»..."
+                await update.message.reply_text(loading)
+                details = await get_article_details(articles[idx], lang)
+                await update.message.reply_text(details)
+                return
+            else:
+                max_n = len(articles)
+                await update.message.reply_text(f"Введите число от 1 до {max_n}" if ru else f"Enter a number from 1 to {max_n}")
+                return
 
-    # Admin copy
-    if message.from_user.id != ADMIN_ID:
-        await bot.send_message(
-            ADMIN_ID,
-            f"[{message.from_user.id} @{message.from_user.username or 'none'}]\n{message.text}\n---\n{reply}"
+    if context.user_data.get("waiting_habit"):
+        context.user_data["waiting_habit"] = False
+        async with db_pool.acquire() as conn:
+            await conn.execute("INSERT INTO habits (user_id, name) VALUES ($1, $2)", user_id, user_text)
+        await update.message.reply_text(f"Привычка '{user_text}' добавлена!" if ru else f"Habit '{user_text}' added!")
+        return
+
+    if context.user_data.get("waiting_shopping"):
+        context.user_data["waiting_shopping"] = False
+        items = [i.strip() for i in re.split(r'[,\n;]', user_text) if i.strip()]
+        async with db_pool.acquire() as conn:
+            for item in items:
+                await conn.execute("INSERT INTO shopping_list (user_id, item) VALUES ($1, $2)", user_id, item)
+        count = len(items)
+        reply = f"Добавлено {count} {'позиция' if count == 1 else 'позиций'} в список покупок!" if ru else f"Added {count} item{'s' if count > 1 else ''} to shopping list!"
+        await update.message.reply_text(reply)
+        return
+
+    if context.user_data.get("waiting_city"):
+        context.user_data["waiting_city"] = False
+        timezone = await get_timezone_by_city(user_text)
+        await save_user(user_id, city=user_text, timezone=timezone)
+        await save_memory_item(user_id, "город", user_text)
+        await update.message.reply_text(f"Город изменён на {user_text}" if ru else f"City changed to {user_text}")
+        return
+
+    if context.user_data.get("waiting_note"):
+        context.user_data["waiting_note"] = False
+        async with db_pool.acquire() as conn:
+            await conn.execute("INSERT INTO notes (user_id, text) VALUES ($1, $2)", user_id, user_text)
+        await update.message.reply_text("Заметка сохранена!" if ru else "Note saved!")
+        return
+
+    if context.user_data.get("waiting_finance"):
+        context.user_data["waiting_finance"] = False
+        parts = user_text.split()
+        try:
+            raw = parts[0].replace(",", ".")
+            is_income = raw.startswith("+")
+            amount = float(raw.replace("+", "").replace("-", ""))
+            finance_type = "income" if is_income else "expense"
+            category = parts[1] if len(parts) > 1 else ("Другое" if ru else "Other")
+            description = " ".join(parts[2:]) if len(parts) > 2 else ""
+            async with db_pool.acquire() as conn:
+                await conn.execute("INSERT INTO finances (user_id, amount, type, category, description) VALUES ($1, $2, $3, $4, $5)", user_id, amount, finance_type, category, description)
+            await update.message.reply_text(f"{'Доход' if is_income else 'Расход'} {amount:.0f} ({category}) сохранён!" if ru else f"{'Income' if is_income else 'Expense'} {amount:.0f} ({category}) saved!")
+        except:
+            await update.message.reply_text("Формат: +1000 зарплата или -500 еда кофе" if ru else "Format: +1000 salary or -500 food coffee")
+        return
+
+    await add_history(user_id, "user", user_text)
+    await extract_and_save_memory(user_id, user_text, lang)
+    history = await get_history_db(user_id)
+    memory = await get_user_memory(user_id)
+    await context.bot.send_chat_action(chat_id=update.effective_chat.id, action="typing")
+
+    try:
+        # Генерация изображений
+        if is_image_gen_request(user_text):
+            await context.bot.send_chat_action(chat_id=update.effective_chat.id, action="upload_photo")
+            prompt = user_text
+            for kw in ["нарисуй", "сгенерируй картинку", "создай изображение", "сделай картинку", "draw", "generate image", "create image"]:
+                prompt = re.sub(kw, "", prompt, flags=re.IGNORECASE).strip()
+            msg = "Генерирую изображение, подождите..." if ru else "Generating image, please wait..."
+            sent_msg = await update.message.reply_text(msg)
+            image_url = await generate_image(prompt)
+            if image_url:
+                if image_url.startswith("data:image"):
+                    import io
+                    img_data = base64.b64decode(image_url.split(",")[1])
+                    await context.bot.send_photo(chat_id=update.effective_chat.id, photo=io.BytesIO(img_data))
+                else:
+                    await context.bot.send_photo(chat_id=update.effective_chat.id, photo=image_url)
+                await notify_admin(context, user_name, username, user_text, "[Сгенерировано изображение]")
+            else:
+                await update.message.reply_text("Не удалось сгенерировать изображение." if ru else "Could not generate image.")
+            return
+
+        # Новости
+        if is_news_request(user_text):
+            query_text = None
+            for kw in ["новости про", "новости о", "news about", "news on"]:
+                if kw in user_text.lower():
+                    query_text = user_text.lower().split(kw)[-1].strip()
+                    break
+            news = await get_news(query=query_text, lang=lang)
+            if news:
+                await update.message.reply_text(news)
+                await notify_admin(context, user_name, username, user_text, news[:200])
+                return
+
+        # Погода в чате
+        if is_weather_request(user_text) and not is_reminder_request(user_text):
+            await context.bot.send_chat_action(chat_id=update.effective_chat.id, action="typing")
+            # Определяем хочет ли завтрашнюю погоду
+            if "завтра" in user_text.lower() or "tomorrow" in user_text.lower():
+                forecast = await get_weather_forecast(city, lang)
+                if forecast:
+                    lines = forecast.split("\n\n")[1].split("\n") if "\n\n" in forecast else []
+                    tomorrow = lines[1] if len(lines) > 1 else ""
+                    if tomorrow:
+                        reply = f"Завтра в {city_in_form(city) if lang == 'ru' else city}: {tomorrow}" if lang == "ru" else f"Tomorrow in {city}: {tomorrow}"
+                        await update.message.reply_text(reply)
+                        await notify_admin(context, user_name, username, user_text, reply)
+                        return
+            weather = await get_weather(city, lang)
+            await update.message.reply_text(weather)
+            await notify_admin(context, user_name, username, user_text, weather)
+            return
+
+        # Напоминания
+        if is_reminder_request(user_text):
+            tz = pytz.timezone(user["timezone"] or "Europe/Moscow")
+            now = datetime.now(tz)
+            essence = await rephrase_reminder(user_text, lang)
+            rel_value, rel_unit = extract_relative_time(user_text)
+            if rel_value is not None:
+                remind_dt = now + (timedelta(minutes=rel_value) if rel_unit == 'minutes' else timedelta(hours=rel_value))
+                job_name = f"once_{user_id}_{remind_dt.strftime('%H%M%S')}"
+                context.application.job_queue.run_once(send_scheduled_reminder, when=remind_dt, data={"user_id": user_id, "essence": essence}, name=job_name)
+                await add_reminder(user_id, remind_dt.strftime("%H:%M"), essence)
+            else:
+                hour, minute = extract_exact_time(user_text)
+                if hour is not None:
+                    time_str = f"{hour:02d}:{minute:02d}"
+                    conflict = await check_conflict_db(user_id, time_str)
+                    if conflict:
+                        await update.message.reply_text(f"В {time_str} уже запланировано: «{conflict}». Выбрать другое время?" if ru else f"At {time_str} already scheduled: «{conflict}». Choose another time?")
+                        return
+                    job_name = f"reminder_{user_id}_{hour}_{minute}"
+                    for job in context.application.job_queue.get_jobs_by_name(job_name):
+                        job.schedule_removal()
+                    tz2 = pytz.timezone(user["timezone"] or "Europe/Moscow")
+                    context.application.job_queue.run_daily(send_scheduled_reminder, time=time(hour=hour, minute=minute, tzinfo=tz2), data={"user_id": user_id, "essence": essence}, name=job_name)
+                    await add_reminder(user_id, time_str, essence)
+
+        dt = get_current_datetime(user.get("timezone", "Europe/Moscow"))
+        date_str = dt["ru"] if ru else dt["en"]
+        comm_style = user.get("comm_style", "наставник" if ru else "mentor")
+        system_prompt = SYSTEM_PROMPT_RU if ru else SYSTEM_PROMPT_EN
+        memory_block = f"\n\nЧто я знаю об этом пользователе:\n{memory}" if memory else ""
+        full_system = f"Сегодня: {date_str}\nСтиль общения: {comm_style}{memory_block}\n\n{system_prompt}" if ru else f"Today: {date_str}\nCommunication style: {comm_style}{memory_block}\n\n{system_prompt}"
+
+        response = ai_client.chat.completions.create(
+            model="gpt-4o-mini",
+            messages=[{"role": "system", "content": full_system}] + history,
+            max_tokens=1000, temperature=0.7
         )
+        reply = response.choices[0].message.content
+        await add_history(user_id, "assistant", reply)
+        await update.message.reply_text(reply)
+        await notify_admin(context, user_name, username, user_text, reply)
+    except Exception as e:
+        logging.error(f"Ошибка: {e}")
+        await update.message.reply_text(t(lang, "error"))
 
-# ─── Startup & main ───────────────────────────────────────────────────────────
-async def on_startup():
+async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    user = await get_user(user_id)
+    if not user or not user["onboarded"]:
+        await update.message.reply_text(t("ru", "not_started"))
+        return
+    lang = user.get("language", "ru")
+    ru = lang == "ru"
+    await context.bot.send_chat_action(chat_id=update.effective_chat.id, action="typing")
+    try:
+        photo = update.message.photo[-1]
+        file = await context.bot.get_file(photo.file_id)
+        with tempfile.NamedTemporaryFile(suffix=".jpg", delete=False) as tmp:
+            tmp_path = tmp.name
+        await file.download_to_drive(tmp_path)
+        with open(tmp_path, "rb") as f:
+            image_data = base64.b64encode(f.read()).decode("utf-8")
+        os.unlink(tmp_path)
+        caption = update.message.caption or ""
+        reply = await analyze_image(image_data, caption, lang)
+        await update.message.reply_text(reply)
+        user_name = update.effective_user.first_name or "Пользователь"
+        username = update.effective_user.username or "нет username"
+        await notify_admin(context, user_name, username, f"[Фото]{' ' + caption if caption else ''}", reply)
+    except Exception as e:
+        logging.error(f"Ошибка фото: {e}")
+        await update.message.reply_text("Не удалось проанализировать фото." if ru else "Could not analyze the photo.")
+
+async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    user_id = update.effective_user.id
+    user = await get_user(user_id)
+    if not user or not user["onboarded"]:
+        await update.message.reply_text(t("ru", "not_started"))
+        return
+    lang = user.get("language", "ru")
+    await context.bot.send_chat_action(chat_id=update.effective_chat.id, action="typing")
+    try:
+        voice = update.message.voice
+        file = await context.bot.get_file(voice.file_id)
+        with tempfile.NamedTemporaryFile(suffix=".ogg", delete=False) as tmp:
+            tmp_path = tmp.name
+        await file.download_to_drive(tmp_path)
+        user_text = await transcribe_voice(tmp_path)
+        os.unlink(tmp_path)
+        if not user_text:
+            await update.message.reply_text("Не смогла распознать голосовое. Попробуйте ещё раз." if lang == "ru" else "Could not recognize voice. Please try again.")
+            return
+        await process_text_message(update, context, user_text)
+    except Exception as e:
+        logging.error(f"Ошибка голосового: {e}")
+        await update.message.reply_text("Не удалось обработать голосовое. Попробуйте текстом." if lang == "ru" else "Could not process voice. Try typing instead.")
+
+async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    await process_text_message(update, context, update.message.text)
+
+async def stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_user.id != ADMIN_ID:
+        await update.message.reply_text("Нет доступа.")
+        return
+    async with db_pool.acquire() as conn:
+        total = await conn.fetchval("SELECT COUNT(*) FROM users WHERE onboarded = TRUE")
+        today = await conn.fetchval("SELECT COUNT(DISTINCT user_id) FROM history WHERE created_at >= NOW() - INTERVAL '1 day'")
+        week = await conn.fetchval("SELECT COUNT(DISTINCT user_id) FROM history WHERE created_at >= NOW() - INTERVAL '7 days'")
+        total_msg = await conn.fetchval("SELECT COUNT(*) FROM history WHERE role = 'user'")
+        ru_users = await conn.fetchval("SELECT COUNT(*) FROM users WHERE language = 'ru' AND onboarded = TRUE")
+        en_users = await conn.fetchval("SELECT COUNT(*) FROM users WHERE language = 'en' AND onboarded = TRUE")
+    await update.message.reply_text(
+        f"София — статистика\n\nВсего: {total}\nРусский: {ru_users}\nEnglish: {en_users}\nАктивны сегодня: {today}\nЗа 7 дней: {week}\nВсего сообщений: {total_msg}"
+    )
+
+async def post_init(application):
     await init_db()
-    await restore_reminders()
-    # Start background tasks
-    asyncio.create_task(morning_routine())
-    asyncio.create_task(evening_summary())
-    asyncio.create_task(pill_daily_checker())
-    asyncio.create_task(goal_progress_checker())
-    asyncio.create_task(cycle_reminder())
-    log.info("Sofia bot started!")
-
-async def main():
-    dp.startup.register(on_startup)
-    await dp.start_polling(bot, skip_updates=True)
 
 if __name__ == "__main__":
-    asyncio.run(main())
+    app = ApplicationBuilder().token(TELEGRAM_TOKEN).post_init(post_init).build()
+    conv_handler = ConversationHandler(
+        entry_points=[CommandHandler("start", start)],
+        states={
+            ASK_NAME: [MessageHandler(filters.TEXT & ~filters.COMMAND, ask_name)],
+            ASK_CITY: [MessageHandler(filters.TEXT & ~filters.COMMAND, ask_city)],
+            ASK_LANGUAGE: [MessageHandler(filters.TEXT & ~filters.COMMAND, ask_language)],
+            ASK_MORNING_PLAN: [MessageHandler(filters.TEXT & ~filters.COMMAND, ask_morning_plan)],
+            ASK_MORNING_TIME: [MessageHandler(filters.TEXT & ~filters.COMMAND, ask_morning_time)],
+            ASK_REMINDERS: [MessageHandler(filters.TEXT & ~filters.COMMAND, finish_onboarding)],
+            ASK_EVENING_NEWS: [MessageHandler(filters.TEXT & ~filters.COMMAND, handle_evening_news_answer)],
+            ASK_EVENING_TIME: [MessageHandler(filters.TEXT & ~filters.COMMAND, handle_evening_time)],
+            ASK_COMM_STYLE: [MessageHandler(filters.TEXT & ~filters.COMMAND, handle_comm_style)],
+        },
+        fallbacks=[CommandHandler("start", start)]
+    )
+    app.add_handler(conv_handler)
+    app.add_handler(CommandHandler("menu", show_menu))
+    app.add_handler(CommandHandler("skills", skills_command))
+    app.add_handler(CommandHandler("announce", announce))
+    app.add_handler(CommandHandler("stats", stats))
+    app.add_handler(CallbackQueryHandler(button_handler))
+    app.add_handler(MessageHandler(filters.PHOTO, handle_photo))
+    app.add_handler(MessageHandler(filters.VOICE, handle_voice))
+    app.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
+    print("🌸 София v5.0 запущена!")
+    app.run_polling()
