@@ -23,6 +23,7 @@ OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY")
 ASSEMBLYAI_KEY = os.environ.get("ASSEMBLYAI_KEY")
 WEATHER_API_KEY = os.environ.get("WEATHER_API_KEY")
 NEWS_API_KEY = os.environ.get("NEWS_API_KEY")
+TAVILY_API_KEY = os.environ.get("TAVILY_API_KEY", "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")
 ADMIN_ID = 944447597
 DATABASE_URL = os.environ.get("DATABASE_URL")
 
@@ -167,8 +168,12 @@ SYSTEM_PROMPT_RU = """Ты — София, личный ассистент и н
 ДАТА И ВРЕМЯ:
 Текущая дата и время указаны в начале сообщения. Ты ВСЕГДА знаешь дату и время. Никогда не говори что не знаешь.
 
-ПАМЯТЬ:
+ПАМЯТЬ И ЧЕСТНОСТЬ:
 Помнишь всё что пользователь говорил. Используй естественно. Никогда не говори "я не помню".
+Если пользователь спрашивает что он просил или о чём говорил — посмотри в историю и ответь честно. Если в истории что-то есть — скажи об этом уверенно, не отрицай.
+Если пользователь утверждает что-то неверное — мягко но уверенно поправь. Не соглашайся слепо. Лучше сказать "нет, в нашем разговоре было вот что..." — это честность, не грубость.
+НИКОГДА не говори "вы меня не просили" если в истории это есть.
+Если информации в истории нет — честно скажи: "Не нашла этого в нашем разговоре, возможно это было раньше."
 
 О СОЗДАТЕЛЕ — дозированно:
 "кто создал" → "Меня создала Ирина Солодкова 🌸"
@@ -624,6 +629,55 @@ async def fetch_articles(query, count=10, page=1):
     except Exception as e:
         logging.error(f"Ошибка fetch_articles: {e}")
         return []
+
+async def web_search_tavily(query, lang="ru"):
+    if not TAVILY_API_KEY:
+        return None
+    try:
+        async with httpx.AsyncClient(timeout=15) as http:
+            response = await http.post(
+                "https://api.tavily.com/search",
+                json={
+                    "api_key": TAVILY_API_KEY,
+                    "query": query,
+                    "search_depth": "basic",
+                    "max_results": 5,
+                    "include_answer": True,
+                }
+            )
+        data = response.json()
+        if data.get("answer"):
+            answer = data["answer"]
+            results = data.get("results", [])
+            sources = []
+            for r in results[:3]:
+                title = r.get("title", "")
+                url = r.get("url", "")
+                if title and url:
+                    sources.append(title + ": " + url)
+            if sources:
+                src_label = "Источники" if lang == "ru" else "Sources"
+                return answer + "\n\n" + src_label + ":\n" + "\n".join(sources)
+            return answer
+        results = data.get("results", [])
+        if results:
+            lines = []
+            for r in results[:4]:
+                title = r.get("title", "")
+                content = r.get("content", "")[:200]
+                if title:
+                    lines.append(title + "\n" + content)
+            return "\n\n".join(lines) if lines else None
+        return None
+    except Exception as e:
+        logging.error("Ошибка Tavily: " + str(e))
+        return None
+
+def is_search_request(text):
+    kw_ru = ["найди", "поищи", "загугли", "что такое", "кто такой", "расскажи о", "кто создал", "найти информацию", "поищи информацию", "есть ли", "что нового"]
+    kw_en = ["search for", "find", "google", "what is", "who is", "tell me about", "find information"]
+    return any(k in text.lower() for k in kw_ru) or any(k in text.lower() for k in kw_en)
+
 
 async def translate_titles(titles, lang="ru"):
     if lang != "ru":
@@ -2663,6 +2717,18 @@ async def process_text_message(update: Update, context: ContextTypes.DEFAULT_TYP
             except Exception as fe:
                 logging.error("Ошибка подсчёта еды: " + str(fe))
 
+        # Поиск в интернете через Tavily
+        search_kw_ru = ["найди", "поищи", "загугли", "что такое", "кто такой", "найти информацию"]
+        search_kw_en = ["search for", "find", "google", "what is", "who is"]
+        is_search = any(k in user_text.lower() for k in search_kw_ru) or any(k in user_text.lower() for k in search_kw_en)
+        if is_search and not is_weather_request(user_text) and not is_news_request(user_text) and not is_image_gen_request(user_text):
+            await context.bot.send_chat_action(chat_id=update.effective_chat.id, action="typing")
+            search_result = await web_search_tavily(user_text, lang)
+            if search_result:
+                await update.message.reply_text(search_result)
+                await notify_admin(context, user_name, username, user_text, search_result[:200])
+                return
+
         # Регулярные занятия — предлагаем планер
         regular_kw = ["всегда", "каждый ", "каждую ", "каждое ", "регулярно", "постоянно",
                       "по понедельникам", "по вторникам", "по средам", "по четвергам",
@@ -2830,6 +2896,71 @@ async def handle_voice(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE):
     await process_text_message(update, context, update.message.text)
+
+async def list_users(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_user.id != ADMIN_ID:
+        await update.message.reply_text("Нет доступа.")
+        return
+    async with db_pool.acquire() as conn:
+        users_list = await conn.fetch("SELECT user_id, name, username, created_at, language, comm_style FROM users WHERE onboarded = TRUE ORDER BY created_at DESC LIMIT 50")
+    if not users_list:
+        await update.message.reply_text("Пользователей нет.")
+        return
+    lines = []
+    for u in users_list:
+        date = u["created_at"].strftime("%d.%m.%Y") if u["created_at"] else "?"
+        lines.append("ID: " + str(u["user_id"]) + " | " + str(u["name"] or "?") + " @" + str(u["username"] or "?") + " | " + date + " | " + str(u["language"]) + " | " + str(u["comm_style"]))
+    cnt = len(users_list)
+    text = "Пользователи (" + str(cnt) + "):\n\n" + "\n".join(lines)
+    if len(text) > 4000:
+        text = text[:4000] + "..."
+    await update.message.reply_text(text)
+
+async def ban_user(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_user.id != ADMIN_ID:
+        await update.message.reply_text("Нет доступа.")
+        return
+    if not context.args:
+        await update.message.reply_text("Использование: /ban USER_ID")
+        return
+    try:
+        target_id = int(context.args[0])
+        async with db_pool.acquire() as conn:
+            await conn.execute("UPDATE users SET onboarded = FALSE WHERE user_id = $1", target_id)
+        await update.message.reply_text("Пользователь " + str(target_id) + " заблокирован.")
+    except Exception as e:
+        await update.message.reply_text("Ошибка: " + str(e))
+
+async def unban_user(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_user.id != ADMIN_ID:
+        await update.message.reply_text("Нет доступа.")
+        return
+    if not context.args:
+        await update.message.reply_text("Использование: /unban USER_ID")
+        return
+    try:
+        target_id = int(context.args[0])
+        async with db_pool.acquire() as conn:
+            await conn.execute("UPDATE users SET onboarded = TRUE WHERE user_id = $1", target_id)
+        await update.message.reply_text("Пользователь " + str(target_id) + " разблокирован.")
+    except Exception as e:
+        await update.message.reply_text("Ошибка: " + str(e))
+
+async def msg_user(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    if update.effective_user.id != ADMIN_ID:
+        await update.message.reply_text("Нет доступа.")
+        return
+    if not context.args or len(context.args) < 2:
+        await update.message.reply_text("Использование: /msg USER_ID Текст сообщения\nНапример: /msg 7630390995 Привет!")
+        return
+    try:
+        target_id = int(context.args[0])
+        text = " ".join(context.args[1:])
+        await context.bot.send_message(chat_id=target_id, text=text)
+        await update.message.reply_text("Сообщение отправлено пользователю " + str(target_id) + ".")
+    except Exception as e:
+        await update.message.reply_text("Ошибка: " + str(e))
+
 
 async def reset_user(update: Update, context: ContextTypes.DEFAULT_TYPE):
     if update.effective_user.id != ADMIN_ID:
@@ -3036,6 +3167,10 @@ if __name__ == "__main__":
     app.add_handler(CommandHandler("announce", announce))
     app.add_handler(CommandHandler("stats", stats))
     app.add_handler(CommandHandler("reset", reset_user))
+    app.add_handler(CommandHandler("users", list_users))
+    app.add_handler(CommandHandler("ban", ban_user))
+    app.add_handler(CommandHandler("unban", unban_user))
+    app.add_handler(CommandHandler("msg", msg_user))
     app.add_handler(CallbackQueryHandler(button_handler))
     app.add_handler(MessageHandler(filters.PHOTO, handle_photo))
     app.add_handler(MessageHandler(filters.VOICE, handle_voice))
