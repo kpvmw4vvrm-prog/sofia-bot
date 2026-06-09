@@ -319,7 +319,8 @@ async def init_db():
             """CREATE TABLE IF NOT EXISTS stress_logs (id SERIAL PRIMARY KEY, user_id BIGINT, level INTEGER, note TEXT, created_at TIMESTAMP DEFAULT NOW())""",
             """CREATE TABLE IF NOT EXISTS goals (id SERIAL PRIMARY KEY, user_id BIGINT, title TEXT, description TEXT, deadline DATE, progress INTEGER DEFAULT 0, created_at TIMESTAMP DEFAULT NOW())""",
             """CREATE TABLE IF NOT EXISTS weight_logs (id SERIAL PRIMARY KEY, user_id BIGINT, weight FLOAT, height FLOAT, created_at TIMESTAMP DEFAULT NOW())""",
-            """CREATE TABLE IF NOT EXISTS nutrition_profile (id SERIAL PRIMARY KEY, user_id BIGINT, height FLOAT, weight FLOAT, goal TEXT, calories_goal INTEGER, created_at TIMESTAMP DEFAULT NOW())""",
+            """CREATE TABLE IF NOT EXISTS nutrition_profile (id SERIAL PRIMARY KEY, user_id BIGINT, height FLOAT, weight FLOAT, age INTEGER, goal TEXT, calories_goal INTEGER, pregnant BOOLEAN DEFAULT FALSE, medications TEXT, created_at TIMESTAMP DEFAULT NOW())""",
+            """CREATE TABLE IF NOT EXISTS food_logs (id SERIAL PRIMARY KEY, user_id BIGINT, description TEXT, calories INTEGER, protein FLOAT, fat FLOAT, carbs FLOAT, created_at TIMESTAMP DEFAULT NOW())""",
         ]:
             await conn.execute(table)
         for col, definition in [
@@ -2095,26 +2096,48 @@ async def process_text_message(update: Update, context: ContextTypes.DEFAULT_TYP
 
     if context.user_data.get("nutrition_setup"):
         step = context.user_data.get("nutrition_step", "height")
-        if step == "height":
+        if step in ["intro", "height"]:
             try:
                 context.user_data["nutrition_height"] = float(user_text.replace(",", "."))
                 context.user_data["nutrition_step"] = "weight"
-                await update.message.reply_text("Отлично! Теперь напишите ваш вес в кг:")
+                await update.message.reply_text("Отлично! Теперь ваш вес в кг:")
             except:
                 await update.message.reply_text("Напишите число, например: 165")
             return
         elif step == "weight":
             try:
                 context.user_data["nutrition_weight"] = float(user_text.replace(",", "."))
+                context.user_data["nutrition_step"] = "age"
+                await update.message.reply_text("Сколько вам лет?")
+            except:
+                await update.message.reply_text("Напишите число, например: 60")
+            return
+        elif step == "age":
+            try:
+                context.user_data["nutrition_age"] = int(user_text.strip())
                 context.user_data["nutrition_step"] = "goal"
                 keyboard = ReplyKeyboardMarkup([["Похудеть", "Набрать вес"], ["Поддержать вес", "Оздоровиться"]], one_time_keyboard=True, resize_keyboard=True)
                 await update.message.reply_text("Какая ваша цель?", reply_markup=keyboard)
             except:
-                await update.message.reply_text("Напишите число, например: 60")
+                await update.message.reply_text("Напишите число, например: 25")
             return
         elif step == "goal":
+            context.user_data["nutrition_goal"] = user_text.strip()
+            context.user_data["nutrition_step"] = "pregnant"
+            keyboard = ReplyKeyboardMarkup([["Нет", "Да, беременна"]], one_time_keyboard=True, resize_keyboard=True)
+            await update.message.reply_text("Вы беременны или кормите грудью?", reply_markup=keyboard)
+            return
+        elif step == "pregnant":
+            is_preg = "да" in user_text.lower()
+            context.user_data["nutrition_pregnant"] = is_preg
+            context.user_data["nutrition_step"] = "meds"
+            await update.message.reply_text("Принимаете ли вы препараты или витамины? Напишите список или нет:", reply_markup=ReplyKeyboardRemove())
+            return
+        elif step == "meds":
+            meds_val = None if user_text.strip().lower() in ["нет", "no", "-"] else user_text.strip()
             h_n = context.user_data.get("nutrition_height", 165)
             w_n = context.user_data.get("nutrition_weight", 60)
+            age_n = context.user_data.get("nutrition_age", 25)
             goal_n = user_text.strip()
             if "похудеть" in goal_n.lower():
                 cal = int(w_n * 30 * 0.8)
@@ -2123,10 +2146,26 @@ async def process_text_message(update: Update, context: ContextTypes.DEFAULT_TYP
             else:
                 cal = int(w_n * 30)
             async with db_pool.acquire() as conn:
-                await conn.execute("INSERT INTO nutrition_profile (user_id, height, weight, goal, calories_goal) VALUES ($1, $2, $3, $4, $5)", user_id, h_n, w_n, goal_n, cal)
+                preg_n = context.user_data.get("nutrition_pregnant", False)
+                goal_n = context.user_data.get("nutrition_goal", "Поддержать вес")
+                if "похудеть" in goal_n.lower():
+                    cal = int(w_n * 30 * 0.8)
+                elif "набрать" in goal_n.lower():
+                    cal = int(w_n * 30 * 1.2)
+                else:
+                    cal = int(w_n * 30)
+                if preg_n: cal = max(cal, 2200)
+                await conn.execute("INSERT INTO nutrition_profile (user_id, height, weight, age, goal, calories_goal, pregnant, medications) VALUES ($1, $2, $3, $4, $5, $6, $7, $8)", user_id, h_n, w_n, age_n, goal_n, cal, preg_n, meds_val)
             context.user_data["nutrition_setup"] = False
             context.user_data["nutrition_step"] = None
-            await update.message.reply_text("Профиль создан!\n\nРост: " + str(int(h_n)) + " см\nВес: " + str(int(w_n)) + " кг\nЦель: " + goal_n + "\nКалорий/день: " + str(cal) + " ккал\n\nТеперь пишите что ели и я посчитаю калории!", reply_markup=ReplyKeyboardRemove())
+            recs = ""
+            if age_n and age_n < 25: recs += "\nВ вашем возрасте важны кальций и витамин D."
+            if context.user_data.get("nutrition_pregnant"): recs += "\nПри беременности добавьте фолиевую кислоту и омега-3."
+            if meds_val: recs += "\nНекоторые препараты влияют на усвоение витаминов — посоветуйтесь с врачом."
+            reply_txt = "Профиль создан!\n\nРост: " + str(int(h_n)) + " см\nВес: " + str(int(w_n)) + " кг\nКалорий/день: " + str(cal) + " ккал"
+            if recs: reply_txt += "\n\nРекомендации:" + recs
+            reply_txt += "\n\nОтправляйте фото еды или пишите что ели — я посчитаю КБЖУ!"
+            await update.message.reply_text(reply_txt, reply_markup=ReplyKeyboardRemove())
             return
 
     if context.user_data.get("waiting_goal"):
@@ -2279,6 +2318,22 @@ async def process_text_message(update: Update, context: ContextTypes.DEFAULT_TYP
                 return
             except Exception as we:
                 logging.error("Погода ошибка: " + str(we))
+        # Проверка таблеток из БД
+        med_kw = ["пила ли я", "принимала ли", "выпила ли я", "таблетку сегодня", "пила сегодня", "принимала сегодня"]
+        if any(k in user_text.lower() for k in med_kw):
+            async with db_pool.acquire() as conn:
+                meds_today = await conn.fetch("SELECT id, name, time_str FROM medications WHERE user_id = $1", user_id)
+            if meds_today:
+                lines_m = []
+                async with db_pool.acquire() as conn:
+                    for med in meds_today:
+                        taken = await conn.fetchval("SELECT COUNT(*) FROM medication_logs WHERE med_id = $1 AND taken_at >= NOW() - INTERVAL '1 day'", med["id"])
+                        lines_m.append(med["name"] + ": " + ("да, принимала" if taken > 0 else "нет, ещё не отмечено"))
+                reply_m = "Таблетки сегодня:\n\n" + "\n".join(lines_m)
+                await update.message.reply_text(reply_m)
+                await notify_admin(context, user_name, username, user_text, reply_m)
+                return
+
         # Регулярные занятия — предлагаем планер
         regular_kw = ["всегда", "каждый ", "каждую ", "каждое ", "регулярно", "постоянно",
                       "по понедельникам", "по вторникам", "по средам", "по четвергам",
@@ -2343,6 +2398,20 @@ async def process_text_message(update: Update, context: ContextTypes.DEFAULT_TYP
     except Exception as e:
         logging.error(f"Ошибка: {e}")
         await update.message.reply_text(t(lang, "error"))
+
+
+async def analyze_food_photo(image_data):
+    try:
+        prompt = "Определи что на фото еды. Дай оценку КБЖУ в формате:\nБлюдо: название\nКалории: число\nБелки: число г\nЖиры: число г\nУглеводы: число г\nКомментарий: краткий совет по составу."
+        response = ai_client.chat.completions.create(
+            model="gpt-4o-mini",
+            messages=[{"role": "user", "content": [{"type": "text", "text": prompt}, {"type": "image_url", "image_url": {"url": "data:image/jpeg;base64," + image_data}}]}],
+            max_tokens=250
+        )
+        return response.choices[0].message.content
+    except Exception as e:
+        logging.error("Ошибка анализа еды: " + str(e))
+        return None
 
 async def handle_photo(update: Update, context: ContextTypes.DEFAULT_TYPE):
     user_id = update.effective_user.id
@@ -2414,9 +2483,41 @@ async def stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
         f"София — статистика\n\nВсего: {total}\nРусский: {ru_users}\nEnglish: {en_users}\nАктивны сегодня: {today}\nЗа 7 дней: {week}\nВсего сообщений: {total_msg}"
     )
 
+
+async def check_cycle_reminders(context):
+    try:
+        async with db_pool.acquire() as conn:
+            users = await conn.fetch("SELECT user_id FROM users WHERE onboarded = TRUE")
+        from datetime import date as _dc, timedelta as _tdc
+        today = _dc.today()
+        for ur in users:
+            uid = ur["user_id"]
+            try:
+                async with db_pool.acquire() as conn:
+                    last = await conn.fetchrow("SELECT start_date, cycle_length FROM cycle_tracking WHERE user_id = $1 ORDER BY created_at DESC LIMIT 1", uid)
+                if not last or not last["start_date"]:
+                    continue
+                start = last["start_date"]
+                length = last["cycle_length"] or 28
+                next_start = start
+                while (next_start - today).days <= 0:
+                    next_start = next_start + _tdc(days=length)
+                days_left = (next_start - today).days
+                if days_left in [3, 1]:
+                    user = await get_user(uid)
+                    name = user["name"] if user else ""
+                    days_word = "день" if days_left == 1 else "дня"
+                    msg = name + ", через " + str(days_left) + " " + days_word + " ожидается начало цикла. Подготовьтесь заранее! 🩸"
+                    await context.bot.send_message(chat_id=uid, text=msg)
+            except:
+                pass
+    except Exception as e:
+        logging.error("Ошибка cycle_check: " + str(e))
+
 async def post_init(application):
     await init_db()
     await restore_reminders(application)
+    application.job_queue.run_daily(check_cycle_reminders, time=time(hour=9, minute=0), name="cycle_check")
 
 if __name__ == "__main__":
     app = ApplicationBuilder().token(TELEGRAM_TOKEN).post_init(post_init).build()
