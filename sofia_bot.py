@@ -398,6 +398,46 @@ async def check_conflict_db(user_id, time_str):
         row = await conn.fetchrow("SELECT text FROM reminders WHERE user_id = $1 AND time_str = $2", user_id, time_str)
         return row["text"] if row else None
 
+async def restore_reminders(application):
+    try:
+        async with db_pool.acquire() as conn:
+            users = await conn.fetch("SELECT * FROM users WHERE onboarded = TRUE")
+        for user in users:
+            user_id = user["user_id"]
+            try:
+                tz = pytz.timezone(user.get("timezone") or "Europe/Moscow")
+            except:
+                tz = pytz.timezone("Europe/Moscow")
+            if user.get("morning_plan") and user.get("morning_time"):
+                try:
+                    h = int(user["morning_time"].split(":")[0])
+                    application.job_queue.run_daily(send_morning_plan, time=time(hour=h, minute=0, tzinfo=tz), data=user_id, name="morning_" + str(user_id))
+                except:
+                    pass
+            if user.get("evening_news") and user.get("evening_time"):
+                try:
+                    h = int(user["evening_time"].split(":")[0])
+                    application.job_queue.run_daily(send_evening_news, time=time(hour=h, minute=0, tzinfo=tz), data=user_id, name="evening_" + str(user_id))
+                except:
+                    pass
+            if user.get("water_reminders"):
+                try:
+                    interval = user.get("water_interval") or 2
+                    application.job_queue.run_repeating(send_water_reminder, interval=interval * 3600, first=interval * 3600, data=user_id, name="water_" + str(user_id))
+                except:
+                    pass
+            async with db_pool.acquire() as conn:
+                reminders = await conn.fetch("SELECT * FROM reminders WHERE user_id = $1", user_id)
+            for r in reminders:
+                try:
+                    h, m = map(int, r["time_str"].split(":"))
+                    application.job_queue.run_daily(send_scheduled_reminder, time=time(hour=h, minute=m, tzinfo=tz), data={"user_id": user_id, "essence": r["text"]}, name="reminder_" + str(user_id) + "_" + str(h) + "_" + str(m))
+                except:
+                    pass
+        logging.info("Напоминания восстановлены из БД")
+    except Exception as e:
+        logging.error("Ошибка restore_reminders: " + str(e))
+
 async def get_all_users():
     async with db_pool.acquire() as conn:
         rows = await conn.fetch("SELECT user_id FROM users WHERE onboarded = TRUE")
@@ -968,13 +1008,59 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
     elif query.data == "menu_diary":
         keyboard = [
-            [InlineKeyboardButton("💰 Финансы" if ru else "💰 Finances", callback_data="diary_finances"), InlineKeyboardButton("😴 Сон" if ru else "😴 Sleep", callback_data="diary_sleep")],
-            [InlineKeyboardButton("📝 Заметки" if ru else "📝 Notes", callback_data="diary_notes"), InlineKeyboardButton("🍳 Рецепты" if ru else "🍳 Recipes", callback_data="diary_recipe")],
-            [InlineKeyboardButton("🎬 Что посмотреть" if ru else "🎬 What to watch", callback_data="diary_movie")],
-            [InlineKeyboardButton("◀️ Назад" if ru else "◀️ Back", callback_data="back_main")],
+            [InlineKeyboardButton("Финансы", callback_data="diary_finances"), InlineKeyboardButton("Сон", callback_data="diary_sleep")],
+            [InlineKeyboardButton("Вода", callback_data="diary_water"), InlineKeyboardButton("Привычки", callback_data="diary_habits")],
+            [InlineKeyboardButton("Заметки", callback_data="diary_notes"), InlineKeyboardButton("Рецепты", callback_data="diary_recipe")],
+            [InlineKeyboardButton("Что посмотреть", callback_data="diary_movie"), InlineKeyboardButton("Покупки", callback_data="diary_shopping")],
+            [InlineKeyboardButton("Планер", callback_data="diary_planner")],
+            [InlineKeyboardButton("Назад", callback_data="back_main")],
         ]
-        await query.edit_message_text("Дневник — выберите раздел:" if ru else "Diary — choose a section:", reply_markup=InlineKeyboardMarkup(keyboard))
+        await query.edit_message_text("Дневник:" if ru else "Diary:", reply_markup=InlineKeyboardMarkup(keyboard))
 
+    elif query.data == "diary_water":
+        water_on = user.get("water_reminders", False)
+        interval = user.get("water_interval", 2)
+        status = "Включены" if water_on else "Выключены"
+        toggle_text = "Выключить" if water_on else "Включить"
+        keyboard = [
+            [InlineKeyboardButton("Выпила воду!", callback_data="water_drink")],
+            [InlineKeyboardButton(toggle_text, callback_data="water_toggle")],
+            [InlineKeyboardButton("Назад", callback_data="menu_diary")],
+        ]
+        text = "Трекер воды\n\nНапоминания: " + status + "\nКаждые " + str(interval) + " часа\nНорма: 8 стаканов"
+        await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard))
+
+    elif query.data == "diary_habits":
+        async with db_pool.acquire() as conn:
+            habits = await conn.fetch("SELECT id, name FROM habits WHERE user_id = $1", user_id)
+        text = "Ваши привычки:\n\n" + "\n".join(["+ " + h["name"] for h in habits]) if habits else "Привычек пока нет."
+        keyboard = [
+            [InlineKeyboardButton("Добавить", callback_data="habit_add")],
+            [InlineKeyboardButton("Отметить", callback_data="habit_log")],
+            [InlineKeyboardButton("Статистика", callback_data="habit_stats")],
+            [InlineKeyboardButton("Назад", callback_data="menu_diary")],
+        ]
+        await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard))
+
+    elif query.data == "diary_shopping":
+        async with db_pool.acquire() as conn:
+            items = await conn.fetch("SELECT id, item, done FROM shopping_list WHERE user_id = $1 ORDER BY created_at", user_id)
+        if items:
+            lines = [("+ " if i["done"] else "- ") + i["item"] for i in items]
+            text = "Список покупок:\n\n" + "\n".join(lines)
+        else:
+            text = "Список покупок пуст. Напишите что добавить!"
+        context.user_data["waiting_shopping"] = True
+        keyboard = [
+            [InlineKeyboardButton("Очистить", callback_data="shopping_clear")],
+            [InlineKeyboardButton("Назад", callback_data="menu_diary")],
+        ]
+        await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup(keyboard))
+
+    elif query.data == "diary_planner":
+        back = InlineKeyboardButton("Назад", callback_data="menu_diary")
+        text = "Планер — фиксированные занятия\n\nСкоро здесь появится полный планер!\n\nА пока расскажите о своих регулярных занятиях прямо в чате.\nНапример: каждую среду в 17:00 у дочки танцы"
+        await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup([[back]]))
     elif query.data == "diary_finances":
         async with db_pool.acquire() as conn:
             income = await conn.fetchval("SELECT SUM(amount) FROM finances WHERE user_id = $1 AND type = 'income' AND created_at >= NOW() - INTERVAL '30 days'", user_id)
@@ -1644,6 +1730,7 @@ async def stats(update: Update, context: ContextTypes.DEFAULT_TYPE):
 
 async def post_init(application):
     await init_db()
+    await restore_reminders(application)
 
 if __name__ == "__main__":
     app = ApplicationBuilder().token(TELEGRAM_TOKEN).post_init(post_init).build()
