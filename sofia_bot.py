@@ -141,7 +141,7 @@ SYSTEM_PROMPT_RU = """Ты — София, личный ассистент и н
 СТИЛЬ ОБЩЕНИЯ — СТРОГО соблюдай стиль из профиля:
 подружка → ОБЯЗАТЕЛЬНО на ты, тепло, неформально, как близкая подруга, можно с юмором. НИКОГДА не говори "вы" при этом стиле!
 наставник → на вы, мотивирующе, поддерживающе, вдохновляюще
-профессионал → на вы, чётко, коротко, без лишних слов и эмодзи
+профессионал → на вы, чётко, коротко, НИКАКИХ эмодзи, НИКАКИХ цветочков 🌸, только текст
 
 ФОРМАТИРОВАНИЕ — СТРОГО:
 Пиши как живой человек в мессенджере. НИКОГДА не используй: # ## ### заголовки, * ** звёздочки, _ курсив, --- разделители. Никакого Markdown! Только чистый текст. Для списков используй цифры или • без звёздочек. Эмодзи умеренно. Короткие абзацы. Один вопрос за раз.
@@ -193,9 +193,7 @@ ABOUT CREATOR: "Irina Solodkova created me 🌸" (17 years old, from Volgograd, 
 
 Plan format: 09:00 — task"""
 
-SKILLS_RU = """Привет! Я София — ваш личный ИИ-ассистент 🌸
-
-Вот всё что я умею:
+SKILLS_RU = """Вот всё что я умею:
 
 Общение и память
 Запоминаю всё что вы рассказываете. Голосовые сообщения, фото, любые вопросы.
@@ -1979,6 +1977,9 @@ async def button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
         back = InlineKeyboardButton("◀️ Назад", callback_data="menu_settings")
         await query.edit_message_text(text, reply_markup=InlineKeyboardMarkup([[back]]))
 
+    elif query.data == "skills_inline":
+        await query.edit_message_text(SKILLS_RU)
+
     elif query.data == "close_menu":
         await query.edit_message_text("Меню закрыто. Напишите /menu чтобы открыть снова 🌸")
 
@@ -1997,6 +1998,17 @@ async def process_text_message(update: Update, context: ContextTypes.DEFAULT_TYP
     ru = lang == "ru"
     user_name = update.effective_user.first_name or "Пользователь"
     username = update.effective_user.username or "нет username"
+
+    # Сбрасываем залипшие флаги если сообщение похоже на обычный разговор
+    chat_kw = ["что у меня","по плану","завтра","сегодня","расскажи","помоги","как дела",
+               "что нового","напомни","погода","привет","спасибо","хочу","могу","буду",
+               "что ты","чем","почему","когда","где","кто","план на","что планируешь",
+               "что случилось","расскажи мне","помоги мне","можешь ли","умеешь ли"]
+    is_chat = any(k in user_text.lower() for k in chat_kw) and len(user_text) > 8
+    if is_chat:
+        for flag in ["waiting_shopping","waiting_note","waiting_finance","waiting_habit",
+                     "waiting_goal","waiting_birthday","waiting_planner"]:
+            context.user_data.pop(flag, None)
 
     # Смена стиля
     if is_change_style_request(user_text):
@@ -2295,7 +2307,7 @@ async def process_text_message(update: Update, context: ContextTypes.DEFAULT_TYP
         if person_name_b and birth_date_b:
             async with db_pool.acquire() as conn:
                 await conn.execute("INSERT INTO birthdays (user_id, person_name, birth_date) VALUES ($1, $2, $3)", user_id, person_name_b, birth_date_b)
-            reply = f"Добавила! Буду напоминать о дне рождения {person_name_b} 🎂"
+            reply = f"День рождения {person_name_b} добавлен! Напомню заранее 🎂"
             await update.message.reply_text(reply)
             await notify_admin(context, user_name, username, user_text, reply)
         else:
@@ -2405,6 +2417,16 @@ async def process_text_message(update: Update, context: ContextTypes.DEFAULT_TYP
             await notify_admin(context, user_name, username, user_text, reply)
         except:
             await update.message.reply_text("Формат: +1000 зарплата или -500 еда кофе")
+        return
+
+    # ── Ответ на "что умеешь" ──────────────────────────────────────────────────────
+    skills_kw = ["что ты умеешь", "что умеешь", "чем можешь помочь", "что можешь", "твои возможности", "что ты делаешь", "на что ты способна"]
+    if any(k in user_text.lower() for k in skills_kw):
+        from telegram import InlineKeyboardButton, InlineKeyboardMarkup
+        kb = InlineKeyboardMarkup([[InlineKeyboardButton("📋 Всё что я умею", callback_data="skills_inline")]])
+        reply = "Помогаю вам становиться лучше каждый день — планирование, здоровье, цели, напоминания, поиск и многое другое. Нажмите кнопку чтобы увидеть полный список!"
+        await update.message.reply_text(reply, reply_markup=kb)
+        await notify_admin(context, user_name, username, user_text, reply)
         return
 
     # ── AI обработка ──────────────────────────────────────────────────────────────
