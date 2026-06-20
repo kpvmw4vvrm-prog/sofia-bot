@@ -1,0 +1,384 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width, initial-scale=1.0, maximum-scale=1.0">
+<title>Планер — Sofia</title>
+<link href="https://fonts.googleapis.com/css2?family=Playfair+Display:wght@600;700&family=DM+Sans:wght@400;500;600&display=swap" rel="stylesheet">
+<script src="https://telegram.org/js/telegram-web-app.js"></script>
+<style>
+*{box-sizing:border-box;margin:0;padding:0;-webkit-tap-highlight-color:transparent}
+body{background:#FDFAF6;color:#1C1C1C;font-family:'DM Sans',sans-serif;min-height:100vh;padding-bottom:80px}
+
+.topbar{background:#fff;border-bottom:1px solid rgba(122,110,102,0.1);padding:14px 20px;display:flex;align-items:center;justify-content:space-between;position:sticky;top:0;z-index:50}
+.logo{font-family:'Playfair Display',serif;font-size:20px;font-weight:700;color:#1C1C1C}
+.logo span{color:#81D4C8}
+
+.view-toggle{display:flex;background:#F5D4D0;border-radius:100px;padding:3px}
+.vbtn{border:none;background:none;border-radius:100px;padding:6px 16px;font-size:12px;font-weight:600;font-family:'DM Sans',sans-serif;color:#9a6878;cursor:pointer;transition:.2s}
+.vbtn.active{background:#fff;color:#1C1C1C;box-shadow:0 2px 8px rgba(0,0,0,0.08)}
+
+.nav-bar{background:#fff;border-bottom:1px solid rgba(122,110,102,0.08);padding:12px 20px;display:flex;align-items:center;justify-content:space-between}
+.nav-label{font-family:'Playfair Display',serif;font-size:17px;font-weight:700;color:#1C1C1C}
+.nav-btn{background:none;border:1.5px solid rgba(122,110,102,0.2);border-radius:100px;width:34px;height:34px;display:flex;align-items:center;justify-content:center;cursor:pointer;font-size:16px;color:#7A6E66;transition:.2s}
+.nav-btn:hover{border-color:#81D4C8;color:#5BBFB2}
+.today-btn{background:none;border:1.5px solid rgba(129,212,200,0.4);border-radius:100px;padding:6px 14px;font-size:12px;font-weight:600;color:#5BBFB2;cursor:pointer;font-family:'DM Sans',sans-serif}
+
+/* НЕДЕЛЯ */
+#week-view{padding:12px 16px}
+.day-block{background:#fff;border-radius:16px;border:1px solid rgba(122,110,102,0.08);margin-bottom:10px;overflow:hidden;box-shadow:0 2px 12px rgba(0,0,0,0.04)}
+.day-header{padding:11px 16px;display:flex;align-items:center;gap:10px;border-bottom:1px solid rgba(122,110,102,0.06)}
+.day-name{font-weight:600;font-size:14px;color:#1C1C1C}
+.day-date{font-size:12px;color:#7A6E66}
+.today-badge{background:#81D4C8;color:#fff;font-size:10px;font-weight:600;padding:2px 8px;border-radius:100px;margin-left:auto}
+.event{padding:10px 16px;display:flex;align-items:flex-start;gap:10px;border-bottom:1px solid rgba(122,110,102,0.04)}
+.event:last-child{border-bottom:none}
+.event-time{font-size:12px;color:#7A6E66;font-weight:500;min-width:36px;padding-top:2px}
+.event-dot{width:8px;height:8px;border-radius:50%;margin-top:5px;flex-shrink:0}
+.event-body{flex:1}
+.event-title{font-size:14px;font-weight:500;color:#1C1C1C}
+.event-person{font-size:12px;color:#7A6E66;margin-top:1px}
+.event-tag{font-size:10px;font-weight:600;padding:2px 8px;border-radius:100px;display:inline-block;margin-top:4px}
+.tag-repeat{background:rgba(129,212,200,0.18);color:#5BBFB2;border:1px solid rgba(129,212,200,0.3)}
+.tag-once{background:rgba(242,212,208,0.4);color:#c47088;border:1px solid rgba(242,212,208,0.8)}
+.empty-day{padding:12px 16px;font-size:13px;color:#7A6E66;font-style:italic}
+.no-events{text-align:center;padding:40px 20px;color:#7A6E66}
+.no-events .icon{font-size:40px;margin-bottom:12px}
+.no-events p{font-size:14px}
+
+/* МЕСЯЦ */
+#month-view{padding:12px 16px;display:none}
+.month-grid-header{display:grid;grid-template-columns:repeat(7,1fr);gap:2px;margin-bottom:4px}
+.month-day-name{text-align:center;font-size:11px;font-weight:600;color:#7A6E66;padding:4px 0}
+.month-grid{display:grid;grid-template-columns:repeat(7,1fr);gap:3px}
+.month-cell{border-radius:10px;padding:4px 2px;min-height:52px;cursor:pointer;transition:.15s;position:relative}
+.month-cell:hover{background:rgba(129,212,200,0.08)}
+.month-cell.other-month .cell-num{color:#c4b8b0}
+.month-cell.today .cell-num-wrap{background:#81D4C8;border-radius:50%;width:26px;height:26px;display:flex;align-items:center;justify-content:center;margin:0 auto}
+.month-cell.today .cell-num{color:#fff}
+.month-cell.selected{background:rgba(129,212,200,0.12)}
+.cell-num{text-align:center;font-size:13px;font-weight:500;color:#1C1C1C;line-height:26px}
+.cell-dots{display:flex;justify-content:center;gap:2px;margin-top:2px;flex-wrap:wrap;padding:0 2px}
+.cell-dot{width:5px;height:5px;border-radius:50%}
+
+/* ДЕТАЛИ ДНЯ */
+.day-detail{background:#fff;border-radius:16px;border:1px solid rgba(122,110,102,0.08);margin-top:12px;overflow:hidden;box-shadow:0 2px 12px rgba(0,0,0,0.04)}
+.day-detail-header{padding:12px 16px;border-bottom:1px solid rgba(122,110,102,0.06);font-family:'Playfair Display',serif;font-size:16px;font-weight:700}
+
+/* ДОБАВИТЬ */
+.fab{position:fixed;bottom:24px;right:20px;background:#81D4C8;color:#fff;border:none;border-radius:100px;padding:14px 22px;font-size:14px;font-weight:600;font-family:'DM Sans',sans-serif;cursor:pointer;box-shadow:0 6px 24px rgba(129,212,200,0.5);display:flex;align-items:center;gap:8px;z-index:40;transition:.25s}
+.fab:hover{background:#5BBFB2;transform:translateY(-2px)}
+
+/* МОДАЛЬНОЕ ОКНО */
+.modal-overlay{display:none;position:fixed;top:0;left:0;right:0;bottom:0;background:rgba(0,0,0,0.3);z-index:100;align-items:flex-end;justify-content:center}
+.modal-overlay.open{display:flex}
+.modal{background:#fff;border-radius:20px 20px 0 0;padding:24px 20px;width:100%;max-height:80vh;overflow-y:auto}
+.modal-title{font-family:'Playfair Display',serif;font-size:20px;font-weight:700;margin-bottom:20px}
+.modal textarea{width:100%;border:1.5px solid rgba(122,110,102,0.15);border-radius:14px;padding:12px 16px;font-size:14px;font-family:'DM Sans',sans-serif;background:#FDFAF6;color:#1C1C1C;outline:none;resize:none;min-height:100px;line-height:1.6}
+.modal textarea:focus{border-color:#81D4C8}
+.modal-hint{font-size:12px;color:#7A6E66;margin-top:8px;margin-bottom:16px;line-height:1.5}
+.modal-actions{display:flex;gap:10px}
+.modal-btn{flex:1;border:none;border-radius:100px;padding:13px;font-size:14px;font-weight:600;font-family:'DM Sans',sans-serif;cursor:pointer;transition:.2s}
+.modal-btn.primary{background:#81D4C8;color:#fff;box-shadow:0 4px 16px rgba(129,212,200,0.4)}
+.modal-btn.primary:hover{background:#5BBFB2}
+.modal-btn.secondary{background:#F5D4D0;color:#9a6878}
+.loading-text{text-align:center;padding:20px;color:#7A6E66;font-size:13px}
+.success-msg{background:rgba(129,212,200,0.18);border:1px solid rgba(129,212,200,0.4);border-radius:12px;padding:12px 16px;font-size:13px;color:#5BBFB2;font-weight:500;margin-bottom:16px;display:none}
+</style>
+</head>
+<body>
+
+<div class="topbar">
+  <div class="logo">Sofia <span>✦</span></div>
+  <div class="view-toggle">
+    <button class="vbtn active" onclick="switchView('week')">Неделя</button>
+    <button class="vbtn" onclick="switchView('month')">Месяц</button>
+  </div>
+</div>
+
+<div class="nav-bar">
+  <button class="nav-btn" onclick="navigate(-1)">‹</button>
+  <span class="nav-label" id="nav-label">Загрузка...</span>
+  <button class="nav-btn" onclick="navigate(1)">›</button>
+</div>
+
+<div id="week-view"></div>
+<div id="month-view">
+  <div class="month-grid-header">
+    <div class="month-day-name">Пн</div>
+    <div class="month-day-name">Вт</div>
+    <div class="month-day-name">Ср</div>
+    <div class="month-day-name">Чт</div>
+    <div class="month-day-name">Пт</div>
+    <div class="month-day-name">Сб</div>
+    <div class="month-day-name">Вс</div>
+  </div>
+  <div class="month-grid" id="month-grid"></div>
+  <div id="day-detail"></div>
+</div>
+
+<button class="fab" onclick="openModal()">
+  <span style="font-size:18px">+</span> Добавить
+</button>
+
+<div class="modal-overlay" id="modal-overlay" onclick="closeModal(event)">
+  <div class="modal">
+    <div class="modal-title">Добавить событие</div>
+    <div class="success-msg" id="success-msg">✓ Сохранено!</div>
+    <textarea id="event-input" placeholder="Напишите что угодно:&#10;• пилатес каждую пятницу в 10:00&#10;• ногти 1-го числа в 17:00&#10;• завтра в 14:00 встреча с Аней&#10;• у Влада тренировка пн-пт в 15:00"></textarea>
+    <div class="modal-hint">Можно написать несколько событий сразу — София всё разберёт 🌸</div>
+    <div class="modal-actions">
+      <button class="modal-btn secondary" onclick="closeModal()">Отмена</button>
+      <button class="modal-btn primary" onclick="saveEvent()" id="save-btn">Сохранить</button>
+    </div>
+  </div>
+</div>
+
+<script>
+const tg = window.Telegram?.WebApp;
+if(tg){tg.ready();tg.expand();}
+
+const API = 'https://sofia-production-fcc2.up.railway.app';
+const userId = tg?.initDataUnsafe?.user?.id;
+
+let currentView = 'week';
+let currentWeekStart = getMonday(new Date());
+let currentMonth = new Date();
+let allEvents = [];
+let selectedDay = null;
+
+const MONTHS_RU = ['январь','февраль','март','апрель','май','июнь','июль','август','сентябрь','октябрь','ноябрь','декабрь'];
+const MONTHS_RU_GEN = ['января','февраля','марта','апреля','мая','июня','июля','августа','сентября','октября','ноября','декабря'];
+const DAYS_RU = ['Понедельник','Вторник','Среда','Четверг','Пятница','Суббота','Воскресенье'];
+const DAYS_SHORT = ['Пн','Вт','Ср','Чт','Пт','Сб','Вс'];
+const COLORS = ['#81D4C8','#F2A4B0','#A8D8A8','#F2C4A0','#B0A8D8','#F2D4A0','#A0C4F2'];
+
+function getMonday(d){
+  const day=d.getDay();
+  const diff=d.getDate()-day+(day===0?-6:1);
+  return new Date(d.setDate(diff));
+}
+
+function dateStr(d){
+  return d.getFullYear()+'-'+(d.getMonth()+1).toString().padStart(2,'0')+'-'+d.getDate().toString().padStart(2,'0');
+}
+
+function isToday(d){
+  const t=new Date();
+  return d.getDate()===t.getDate()&&d.getMonth()===t.getMonth()&&d.getFullYear()===t.getFullYear();
+}
+
+async function loadEvents(){
+  if(!userId){
+    // Demo mode
+    allEvents = [];
+    render();
+    return;
+  }
+  try{
+    const res = await fetch(`${API}/planner/events/${userId}`);
+    allEvents = await res.json();
+  }catch(e){
+    allEvents=[];
+  }
+  render();
+}
+
+function getEventsForDate(date){
+  const ds=dateStr(date);
+  const wd=date.getDay()===0?6:date.getDay()-1;
+  const dom=date.getDate();
+  return allEvents.filter(ev=>{
+    if(ev.repeat_type==='once') return ev.event_date===ds;
+    if(ev.repeat_type==='weekly') return ev.repeat_day===wd;
+    if(ev.repeat_type==='monthly_day') return ev.repeat_month_day===dom;
+    return false;
+  }).sort((a,b)=>(a.event_time||'').localeCompare(b.event_time||''));
+}
+
+function getColor(title){
+  let h=0;
+  for(let c of title)h+=c.charCodeAt(0);
+  return COLORS[h%COLORS.length];
+}
+
+function render(){
+  if(currentView==='week') renderWeek();
+  else renderMonth();
+}
+
+function renderWeek(){
+  const container=document.getElementById('week-view');
+  const days=[];
+  for(let i=0;i<7;i++){
+    const d=new Date(currentWeekStart);
+    d.setDate(d.getDate()+i);
+    days.push(d);
+  }
+  const start=days[0];
+  const end=days[6];
+  document.getElementById('nav-label').textContent=
+    `${start.getDate()} ${MONTHS_RU_GEN[start.getMonth()]} — ${end.getDate()} ${MONTHS_RU_GEN[end.getMonth()]}`;
+
+  let html='';
+  let hasAny=false;
+  days.forEach(d=>{
+    const evs=getEventsForDate(d);
+    const today=isToday(d);
+    const wd=d.getDay()===0?6:d.getDay()-1;
+    html+=`<div class="day-block">
+      <div class="day-header">
+        <span class="day-name">${DAYS_RU[wd]}</span>
+        <span class="day-date">${d.getDate()} ${MONTHS_RU_GEN[d.getMonth()]}</span>
+        ${today?'<span class="today-badge">Сегодня</span>':''}
+      </div>`;
+    if(evs.length){
+      hasAny=true;
+      evs.forEach(ev=>{
+        const color=getColor(ev.title);
+        const isRepeat=ev.repeat_type!=='once';
+        html+=`<div class="event">
+          <div class="event-time">${ev.event_time||''}</div>
+          <div class="event-dot" style="background:${color}"></div>
+          <div class="event-body">
+            <div class="event-title">${ev.title}</div>
+            ${ev.person_name?`<div class="event-person">${ev.person_name}</div>`:''}
+            <span class="event-tag ${isRepeat?'tag-repeat':'tag-once'}">${isRepeat?'🔄 регулярно':'разово'}</span>
+          </div>
+        </div>`;
+      });
+    }else{
+      html+=`<div class="empty-day">Событий нет</div>`;
+    }
+    html+='</div>';
+  });
+  container.innerHTML=html||'<div class="no-events"><div class="icon">📅</div><p>Событий нет.<br>Нажмите + чтобы добавить</p></div>';
+}
+
+function renderMonth(){
+  const year=currentMonth.getFullYear();
+  const month=currentMonth.getMonth();
+  document.getElementById('nav-label').textContent=`${MONTHS_RU[month].charAt(0).toUpperCase()+MONTHS_RU[month].slice(1)} ${year}`;
+
+  const firstDay=new Date(year,month,1);
+  const lastDay=new Date(year,month+1,0);
+  const startWd=firstDay.getDay()===0?6:firstDay.getDay()-1;
+  const today=new Date();
+
+  let html='';
+  // Prev month days
+  for(let i=0;i<startWd;i++){
+    const d=new Date(year,month,1-startWd+i);
+    html+=`<div class="month-cell other-month"><div class="cell-num">${d.getDate()}</div></div>`;
+  }
+  // Current month
+  for(let day=1;day<=lastDay.getDate();day++){
+    const d=new Date(year,month,day);
+    const isT=isToday(d);
+    const evs=getEventsForDate(d);
+    const isSel=selectedDay&&dateStr(d)===dateStr(selectedDay);
+    html+=`<div class="month-cell${isT?' today':''}${isSel?' selected':''}" onclick="selectDay(new Date(${year},${month},${day}))">
+      <div class="${isT?'cell-num-wrap':''}"><div class="cell-num">${day}</div></div>
+      ${evs.length?`<div class="cell-dots">${evs.slice(0,3).map(e=>`<div class="cell-dot" style="background:${getColor(e.title)}"></div>`).join('')}</div>`:''}
+    </div>`;
+  }
+  document.getElementById('month-grid').innerHTML=html;
+  if(selectedDay) renderDayDetail(selectedDay);
+}
+
+function selectDay(d){
+  selectedDay=d;
+  renderMonth();
+}
+
+function renderDayDetail(d){
+  const evs=getEventsForDate(d);
+  const wd=d.getDay()===0?6:d.getDay()-1;
+  let html=`<div class="day-detail">
+    <div class="day-detail-header">${DAYS_RU[wd]}, ${d.getDate()} ${MONTHS_RU_GEN[d.getMonth()]}</div>`;
+  if(evs.length){
+    evs.forEach(ev=>{
+      const color=getColor(ev.title);
+      html+=`<div class="event">
+        <div class="event-time">${ev.event_time||''}</div>
+        <div class="event-dot" style="background:${color}"></div>
+        <div class="event-body">
+          <div class="event-title">${ev.title}</div>
+          ${ev.person_name?`<div class="event-person">${ev.person_name}</div>`:''}
+        </div>
+      </div>`;
+    });
+  }else{
+    html+=`<div class="empty-day">Событий нет</div>`;
+  }
+  html+='</div>';
+  document.getElementById('day-detail').innerHTML=html;
+}
+
+function switchView(v){
+  currentView=v;
+  document.querySelectorAll('.vbtn').forEach((b,i)=>{
+    b.classList.toggle('active',(i===0&&v==='week')||(i===1&&v==='month'));
+  });
+  document.getElementById('week-view').style.display=v==='week'?'block':'none';
+  document.getElementById('month-view').style.display=v==='month'?'block':'none';
+  render();
+}
+
+function navigate(dir){
+  if(currentView==='week'){
+    currentWeekStart.setDate(currentWeekStart.getDate()+dir*7);
+    renderWeek();
+  }else{
+    currentMonth.setMonth(currentMonth.getMonth()+dir);
+    selectedDay=null;
+    document.getElementById('day-detail').innerHTML='';
+    renderMonth();
+  }
+}
+
+function openModal(){
+  document.getElementById('modal-overlay').classList.add('open');
+  document.getElementById('event-input').focus();
+}
+
+function closeModal(e){
+  if(e&&e.target!==document.getElementById('modal-overlay'))return;
+  document.getElementById('modal-overlay').classList.remove('open');
+  document.getElementById('event-input').value='';
+  document.getElementById('success-msg').style.display='none';
+}
+
+async function saveEvent(){
+  const text=document.getElementById('event-input').value.trim();
+  if(!text)return;
+  const btn=document.getElementById('save-btn');
+  btn.textContent='Сохраняю...';
+  btn.disabled=true;
+  try{
+    const res=await fetch(`${API}/planner/add`,{
+      method:'POST',
+      headers:{'Content-Type':'application/json'},
+      body:JSON.stringify({user_id:userId,text})
+    });
+    const data=await res.json();
+    document.getElementById('success-msg').style.display='block';
+    document.getElementById('event-input').value='';
+    await loadEvents();
+    setTimeout(()=>{
+      document.getElementById('modal-overlay').classList.remove('open');
+      document.getElementById('success-msg').style.display='none';
+    },1500);
+  }catch(e){
+    alert('Ошибка. Попробуйте ещё раз.');
+  }
+  btn.textContent='Сохранить';
+  btn.disabled=false;
+}
+
+// Init
+switchView('week');
+loadEvents();
+</script>
+</body>
+</html>
