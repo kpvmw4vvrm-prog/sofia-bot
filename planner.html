@@ -1,1 +1,658 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+<meta charset="UTF-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,maximum-scale=1,user-scalable=no">
+<title>Sofia</title>
+<link href="https://fonts.googleapis.com/css2?family=Playfair+Display:wght@600;700&family=DM+Sans:wght@400;500;600&display=swap" rel="stylesheet">
+<script src="https://telegram.org/js/telegram-web-app.js"></script>
+<style>
+*{box-sizing:border-box;margin:0;padding:0;-webkit-tap-highlight-color:transparent}
+:root{--cr:#FDFAF6;--pk:#F5D4D0;--tl:#81D4C8;--td:#5BBFB2;--tx:#1C1C1C;--ts:#7A6E66;--br:rgba(122,110,102,0.1);--wh:#fff;--sh:0 2px 12px rgba(0,0,0,0.05)}
+html,body{height:100%;overflow:hidden}
+body{background:var(--cr);color:var(--tx);font-family:"DM Sans",sans-serif;display:flex;flex-direction:column}
+.topbar{background:var(--wh);border-bottom:1px solid var(--br);padding:12px 20px;display:flex;align-items:center;justify-content:space-between;flex-shrink:0}
+.logo{font-family:"Playfair Display",serif;font-size:19px;font-weight:700}.logo span{color:var(--tl)}
+.top-user{font-size:13px;color:var(--ts);font-weight:500}
+.content{flex:1;overflow-y:auto;padding:16px;padding-bottom:72px}
+.bnav{position:fixed;bottom:0;left:0;right:0;background:var(--wh);border-top:1px solid var(--br);display:flex;z-index:50;padding-bottom:env(safe-area-inset-bottom)}
+.ni{flex:1;display:flex;flex-direction:column;align-items:center;padding:9px 4px 7px;cursor:pointer;border:none;background:none;font-family:"DM Sans",sans-serif;transition:.15s}
+.ni-icon{font-size:19px;margin-bottom:2px}
+.ni-lbl{font-size:10px;font-weight:500;color:var(--ts)}
+.ni.active .ni-lbl{color:var(--td)}
+.ni.active .ni-icon{transform:scale(1.1)}
+.sec{display:none}.sec.active{display:block}
+/* CARDS */
+.card{background:var(--wh);border-radius:16px;border:1px solid var(--br);box-shadow:var(--sh);margin-bottom:12px;overflow:hidden}
+.card-ttl{font-family:"Playfair Display",serif;font-size:15px;font-weight:700;padding:12px 16px;border-bottom:1px solid var(--br)}
+/* TABS */
+.tabs{display:flex;background:var(--pk);border-radius:100px;padding:3px;margin-bottom:14px}
+.tab{flex:1;border:none;background:none;border-radius:100px;padding:7px;font-size:12px;font-weight:600;font-family:"DM Sans",sans-serif;color:#9a6878;cursor:pointer;transition:.2s}
+.tab.active{background:var(--wh);color:var(--tx);box-shadow:0 2px 8px rgba(0,0,0,0.08)}
+/* NAV ROW */
+.nav-row{display:flex;align-items:center;justify-content:space-between;margin-bottom:12px}
+.nav-ttl{font-family:"Playfair Display",serif;font-size:16px;font-weight:700}
+.arr{background:none;border:1.5px solid var(--br);border-radius:100px;width:32px;height:32px;display:flex;align-items:center;justify-content:center;cursor:pointer;font-size:16px;color:var(--ts)}
+.td-btn{background:none;border:1.5px solid rgba(129,212,200,.5);border-radius:100px;padding:5px 12px;font-size:11px;font-weight:600;color:var(--td);cursor:pointer;font-family:"DM Sans",sans-serif;margin-bottom:12px}
+/* EVENTS */
+.day-block{background:var(--wh);border-radius:14px;border:1px solid var(--br);margin-bottom:8px;overflow:hidden}
+.day-hdr{padding:9px 14px;display:flex;align-items:center;gap:8px}
+.day-nm{font-weight:600;font-size:13px}.day-dt{font-size:12px;color:var(--ts)}
+.td-pill{background:var(--tl);color:var(--wh);font-size:10px;font-weight:600;padding:2px 8px;border-radius:100px;margin-left:auto}
+.ev{padding:9px 14px;display:flex;align-items:flex-start;gap:9px;border-top:1px solid rgba(122,110,102,.05)}
+.ev-t{font-size:11px;color:var(--ts);font-weight:500;min-width:34px;padding-top:3px}
+.ev-dot{width:7px;height:7px;border-radius:50%;margin-top:5px;flex-shrink:0}
+.ev-ttl{font-size:13px;font-weight:500}
+.ev-per{font-size:11px;color:var(--ts);margin-top:1px}
+.ev-tag{font-size:10px;font-weight:600;padding:2px 7px;border-radius:100px;display:inline-block;margin-top:3px}
+.tr{background:rgba(129,212,200,.18);color:var(--td)}.to{background:rgba(242,212,208,.5);color:#b06070}
+.xbtn{background:none;border:none;color:#ddd;font-size:16px;cursor:pointer;margin-left:auto;flex-shrink:0}
+.xbtn:hover{color:#c47088}
+.empty{padding:10px 14px;font-size:12px;color:var(--ts);font-style:italic}
+/* MONTH */
+.mhdr{display:grid;grid-template-columns:repeat(7,1fr);gap:2px;margin-bottom:4px}
+.mdn{text-align:center;font-size:11px;font-weight:600;color:var(--ts);padding:3px 0}
+.mgrid{display:grid;grid-template-columns:repeat(7,1fr);gap:2px;margin-bottom:12px}
+.mc{border-radius:8px;padding:3px 1px;min-height:46px;cursor:pointer;text-align:center;transition:.15s}
+.mc:hover{background:rgba(129,212,200,.08)}
+.mc.other .mn{color:#c4b0b0}
+.mc.today .mn-w{background:var(--tl);border-radius:50%;width:24px;height:24px;display:flex;align-items:center;justify-content:center;margin:0 auto}
+.mc.today .mn{color:var(--wh)}.mc.sel{background:rgba(129,212,200,.12)}
+.mn{font-size:12px;font-weight:500;line-height:24px}
+.mdots{display:flex;justify-content:center;gap:2px;margin-top:2px}
+.mdot{width:4px;height:4px;border-radius:50%}
+/* TASKS */
+.task{padding:10px 14px;display:flex;align-items:center;gap:10px;border-top:1px solid rgba(122,110,102,.05)}
+.chk{width:20px;height:20px;border-radius:6px;border:2px solid var(--br);display:flex;align-items:center;justify-content:center;cursor:pointer;flex-shrink:0;transition:.2s}
+.chk.done{background:var(--tl);border-color:var(--tl)}
+.chk.done::after{content:"✓";color:var(--wh);font-size:11px;font-weight:700}
+.task-tx{font-size:13px;font-weight:500;flex:1}.task-tx.done{text-decoration:line-through;color:var(--ts)}
+/* REMINDERS */
+.rem{padding:11px 14px;display:flex;align-items:flex-start;gap:10px;border-top:1px solid rgba(122,110,102,.05)}
+.rem-dot{width:8px;height:8px;border-radius:50%;margin-top:5px;flex-shrink:0}
+.rem-dot.active{background:#f0a060}
+.rem-dot.sent{background:#c4c4c4}
+.rem-body{flex:1}
+.rem-tx{font-size:13px;font-weight:500}
+.rem-tx.sent{color:var(--ts);text-decoration:line-through}
+.rem-time{font-size:11px;color:var(--ts);margin-top:2px}
+.rem-badge{font-size:10px;font-weight:600;padding:2px 7px;border-radius:100px;display:inline-block;margin-top:3px}
+.rb-active{background:rgba(240,160,96,.18);color:#c07030;border:1px solid rgba(240,160,96,.3)}
+.rb-sent{background:rgba(122,110,102,.1);color:var(--ts)}
+/* ADD */
+.add-row{display:flex;gap:8px;margin-bottom:12px}
+.add-inp{flex:1;border:1.5px solid var(--br);border-radius:100px;padding:9px 16px;font-size:13px;font-family:"DM Sans",sans-serif;background:var(--wh);color:var(--tx);outline:none;transition:.2s}
+.add-inp:focus{border-color:var(--tl)}
+.add-btn{background:var(--tl);color:var(--wh);border:none;border-radius:100px;padding:9px 18px;font-size:14px;font-weight:600;cursor:pointer;transition:.2s}
+.add-btn:hover{background:var(--td)}
+/* GOALS */
+.goal{padding:14px;border-top:1px solid rgba(122,110,102,.05)}
+.goal-top{display:flex;justify-content:space-between;align-items:flex-start;margin-bottom:8px}
+.goal-nm{font-size:14px;font-weight:600;flex:1;margin-right:8px}
+.goal-pct{font-family:"Playfair Display",serif;font-size:18px;font-weight:700;color:var(--td);flex-shrink:0}
+.goal-bar-w{background:rgba(122,110,102,.1);border-radius:100px;height:6px;margin-bottom:6px}
+.goal-bar{background:linear-gradient(90deg,var(--tl),var(--td));border-radius:100px;height:6px;transition:.5s}
+.goal-dl{font-size:11px;color:var(--ts)}
+.goal-done{opacity:.6}
+/* FINANCES */
+.fin-sum{display:grid;grid-template-columns:1fr 1fr 1fr;gap:8px;margin-bottom:12px}
+.fc{background:var(--wh);border-radius:12px;border:1px solid var(--br);padding:12px;text-align:center}
+.fn{font-family:"Playfair Display",serif;font-size:20px;font-weight:700}
+.fn.i{color:#5a9a6a}.fn.e{color:#c47088}.fn.b{color:var(--td)}
+.fl{font-size:10px;color:var(--ts);font-weight:500;text-transform:uppercase;margin-top:3px}
+.fi{padding:10px 14px;display:flex;align-items:center;gap:10px;border-top:1px solid rgba(122,110,102,.05)}
+.fi-ic{width:30px;height:30px;border-radius:10px;display:flex;align-items:center;justify-content:center;font-size:14px}
+.fi-ic.i{background:rgba(90,154,106,.12)}.fi-ic.e{background:rgba(196,112,136,.1)}
+.fi-inf{flex:1}.fi-cat{font-size:13px;font-weight:500}.fi-desc{font-size:11px;color:var(--ts)}
+.fi-amt{font-size:14px;font-weight:600}
+.fi-amt.i{color:#5a9a6a}.fi-amt.e{color:#c47088}
+.fin-tabs{display:flex;gap:6px;margin-bottom:12px}
+.fin-tab{border:1.5px solid var(--br);border-radius:100px;padding:5px 14px;font-size:12px;font-weight:600;cursor:pointer;background:var(--wh);font-family:"DM Sans",sans-serif;color:var(--ts);transition:.2s}
+.fin-tab.active{background:var(--tl);border-color:var(--tl);color:var(--wh)}
+/* SHOPPING */
+.shop{padding:10px 14px;display:flex;align-items:center;gap:10px;border-top:1px solid rgba(122,110,102,.05)}
+.schk{width:20px;height:20px;border-radius:50%;border:2px solid var(--br);display:flex;align-items:center;justify-content:center;cursor:pointer;flex-shrink:0;transition:.2s}
+.schk.done{background:var(--tl);border-color:var(--tl)}
+.schk.done::after{content:"✓";color:var(--wh);font-size:11px;font-weight:700}
+.shop-tx{font-size:13px;font-weight:500;flex:1}.shop-tx.done{text-decoration:line-through;color:var(--ts)}
+/* HEALTH */
+.stress-g{display:grid;grid-template-columns:repeat(5,1fr);gap:6px;margin-bottom:8px}
+.sb{border:1.5px solid var(--br);border-radius:10px;padding:8px 4px;font-size:13px;font-weight:600;font-family:"DM Sans",sans-serif;cursor:pointer;background:var(--wh);text-align:center;transition:.2s}
+.sb.sel{background:var(--tl);border-color:var(--tl);color:var(--wh)}
+.stress-chart{height:80px;position:relative;margin-top:12px;display:flex;align-items:flex-end;gap:4px}
+.sc-bar{flex:1;border-radius:4px 4px 0 0;min-height:4px;transition:.3s;position:relative}
+.sc-lbl{position:absolute;bottom:-16px;left:50%;transform:translateX(-50%);font-size:9px;color:var(--ts);white-space:nowrap}
+.stress-chart-wrap{overflow:hidden;padding-bottom:20px}
+.med-item{padding:10px 14px;display:flex;align-items:center;gap:10px;border-top:1px solid rgba(122,110,102,.05)}
+.med-t{font-size:12px;color:var(--ts);font-weight:500;min-width:40px}
+.med-n{flex:1;font-size:13px;font-weight:500}
+.med-btn{border:1.5px solid var(--br);border-radius:100px;padding:4px 12px;font-size:11px;font-weight:600;cursor:pointer;font-family:"DM Sans",sans-serif;color:var(--ts);background:var(--wh);transition:.2s}
+.med-btn.taken{background:var(--tl);border-color:var(--tl);color:var(--wh)}
+/* CYCLE */
+.cycle-info{padding:14px 16px}
+.cycle-row{display:flex;justify-content:space-between;padding:8px 0;border-bottom:1px solid rgba(122,110,102,.06);font-size:13px}
+.cycle-row:last-child{border-bottom:none}
+.cycle-key{color:var(--ts);font-weight:500}
+.cycle-val{font-weight:600;color:var(--tx)}
+.cycle-cal{display:grid;grid-template-columns:repeat(7,1fr);gap:3px;padding:12px 14px}
+.cc{text-align:center;padding:4px 2px;border-radius:8px;font-size:12px;font-weight:500;cursor:pointer}
+.cc.period{background:rgba(196,112,136,.2);color:#c47088;font-weight:600}
+.cc.predicted{background:rgba(242,212,208,.4);color:#b06070}
+.cc.today{background:var(--tl);color:var(--wh);font-weight:700}
+/* WATER */
+.water-bar-w{background:rgba(122,110,102,.1);border-radius:100px;height:8px}
+.water-bar{background:linear-gradient(90deg,var(--tl),var(--td));border-radius:100px;height:8px;transition:.4s;width:0%}
+/* SETTINGS */
+.setting-row{padding:14px 16px;display:flex;align-items:center;justify-content:space-between;border-top:1px solid rgba(122,110,102,.05);cursor:pointer}
+.setting-row:first-child{border-top:none}
+.setting-lbl{font-size:14px;font-weight:500}
+.setting-val{font-size:13px;color:var(--ts)}
+.setting-arr{color:var(--ts);font-size:16px}
+.sel-grid{display:grid;gap:8px;padding:14px 16px}
+.sel-btn{border:1.5px solid var(--br);border-radius:12px;padding:11px 14px;font-size:13px;font-weight:500;cursor:pointer;background:var(--wh);font-family:"DM Sans",sans-serif;color:var(--tx);text-align:left;transition:.2s;display:flex;align-items:center;gap:10px}
+.sel-btn.active{border-color:var(--tl);background:rgba(129,212,200,.08)}
+.sel-btn.active::after{content:"✓";margin-left:auto;color:var(--td);font-weight:700}
+.toggle{width:44px;height:24px;border-radius:100px;background:rgba(122,110,102,.2);position:relative;cursor:pointer;transition:.3s;flex-shrink:0}
+.toggle.on{background:var(--tl)}
+.toggle::after{content:"";position:absolute;width:20px;height:20px;border-radius:50%;background:var(--wh);top:2px;left:2px;transition:.3s;box-shadow:0 1px 4px rgba(0,0,0,.2)}
+.toggle.on::after{left:22px}
+/* FAB */
+.fab{position:fixed;bottom:76px;right:18px;background:var(--tl);color:var(--wh);border:none;border-radius:100px;padding:12px 20px;font-size:14px;font-weight:600;font-family:"DM Sans",sans-serif;cursor:pointer;box-shadow:0 6px 20px rgba(129,212,200,.5);z-index:40;transition:.25s}
+.fab:hover{background:var(--td);transform:translateY(-1px)}
+/* MODAL */
+.mo{display:none;position:fixed;inset:0;background:rgba(0,0,0,.35);z-index:200;align-items:flex-end}
+.mo.open{display:flex}
+.modal{background:var(--wh);border-radius:20px 20px 0 0;padding:24px 20px 32px;width:100%;max-height:80vh;overflow-y:auto}
+.modal-ttl{font-family:"Playfair Display",serif;font-size:19px;font-weight:700;margin-bottom:14px}
+.modal textarea{width:100%;border:1.5px solid var(--br);border-radius:14px;padding:12px 16px;font-size:14px;font-family:"DM Sans",sans-serif;background:var(--cr);color:var(--tx);outline:none;resize:none;min-height:90px;line-height:1.6}
+.modal textarea:focus{border-color:var(--tl)}
+.modal-hint{font-size:12px;color:var(--ts);margin:8px 0 14px;line-height:1.5}
+.mbtns{display:flex;gap:8px}
+.mbtn{flex:1;border:none;border-radius:100px;padding:13px;font-size:14px;font-weight:600;font-family:"DM Sans",sans-serif;cursor:pointer}
+.mbtn.p{background:var(--tl);color:var(--wh);box-shadow:0 4px 16px rgba(129,212,200,.4)}
+.mbtn.s{background:var(--pk);color:#9a6878}
+.ok-msg{background:rgba(129,212,200,.18);border:1px solid rgba(129,212,200,.4);border-radius:12px;padding:10px 14px;font-size:13px;color:var(--td);font-weight:500;margin-bottom:12px;display:none}
+.slbl{font-size:11px;font-weight:600;color:var(--ts);letter-spacing:.07em;text-transform:uppercase;margin-bottom:10px;margin-top:4px}
+.ldr{text-align:center;padding:24px;color:var(--ts);font-size:13px}
+.clr-btn{width:100%;margin-top:8px;border-radius:12px;padding:10px;background:rgba(196,112,136,.1);color:#c47088;border:1px solid rgba(196,112,136,.2);font-family:"DM Sans",sans-serif;font-size:13px;font-weight:600;cursor:pointer}
+.big-btn{width:100%;background:linear-gradient(135deg,var(--tl),var(--td));color:var(--wh);border:none;border-radius:100px;padding:15px;font-size:14px;font-weight:600;font-family:"DM Sans",sans-serif;cursor:pointer;box-shadow:0 6px 20px rgba(129,212,200,.4);margin-top:8px}
+</style>
+</head>
+<body>
+<div class="topbar">
+  <div class="logo">Sofia <span>✦</span></div>
+  <div class="top-user" id="top-user"></div>
+</div>
+<div class="content">
 
+  <!-- PLANNING -->
+  <div class="sec active" id="sec-planning">
+    <div class="tabs">
+      <button class="tab active" onclick="setPV('cal',this)">Календарь</button>
+      <button class="tab" onclick="setPV('tasks',this)">Задачи</button>
+      <button class="tab" onclick="setPV('rems',this)">Напоминания</button>
+    </div>
+    <!-- CALENDAR -->
+    <div id="pv-cal">
+      <div class="tabs" style="margin-bottom:10px">
+        <button class="tab active" onclick="setCV('week',this)">Неделя</button>
+        <button class="tab" onclick="setCV('month',this)">Месяц</button>
+      </div>
+      <div id="cv-week">
+        <div class="nav-row">
+          <button class="arr" onclick="navW(-1)">&#8249;</button>
+          <span class="nav-ttl" id="w-lbl"></span>
+          <button class="arr" onclick="navW(1)">&#8250;</button>
+        </div>
+        <button class="td-btn" onclick="resetW()">Сегодня</button>
+        <div id="week-content"><div class="ldr">Загрузка...</div></div>
+      </div>
+      <div id="cv-month" style="display:none">
+        <div class="nav-row">
+          <button class="arr" onclick="navM(-1)">&#8249;</button>
+          <span class="nav-ttl" id="m-lbl"></span>
+          <button class="arr" onclick="navM(1)">&#8250;</button>
+        </div>
+        <div class="mhdr"><div class="mdn">Пн</div><div class="mdn">Вт</div><div class="mdn">Ср</div><div class="mdn">Чт</div><div class="mdn">Пт</div><div class="mdn">Сб</div><div class="mdn">Вс</div></div>
+        <div class="mgrid" id="mgrid"></div>
+        <div id="mday-det"></div>
+      </div>
+    </div>
+    <!-- TASKS -->
+    <div id="pv-tasks" style="display:none">
+      <div class="slbl">Список дел</div>
+      <div class="add-row"><input class="add-inp" id="task-inp" placeholder="Добавить дело..."><button class="add-btn" onclick="addTask()">+</button></div>
+      <div class="tabs" style="margin-bottom:10px">
+        <button class="tab active" onclick="setTaskFilter('active',this)">Активные</button>
+        <button class="tab" onclick="setTaskFilter('done',this)">Выполненные</button>
+      </div>
+      <div class="card"><div id="tasks-list"><div class="ldr">Загрузка...</div></div></div>
+    </div>
+    <!-- REMINDERS -->
+    <div id="pv-rems" style="display:none">
+      <div class="slbl">Ближайшие напоминания</div>
+      <div class="card"><div id="rems-active"><div class="ldr">Загрузка...</div></div></div>
+      <div class="slbl" style="margin-top:4px">История</div>
+      <div class="card"><div id="rems-history"><div class="ldr">...</div></div></div>
+    </div>
+  </div>
+
+  <!-- GOALS -->
+  <div class="sec" id="sec-goals">
+    <div class="tabs">
+      <button class="tab active" onclick="setGV('active',this)">Активные</button>
+      <button class="tab" onclick="setGV('done',this)">Завершённые</button>
+    </div>
+    <div class="add-row"><input class="add-inp" id="goal-inp" placeholder="Новая цель (например: выучить английский к июню)"><button class="add-btn" onclick="addGoal()">+</button></div>
+    <div id="goals-list"><div class="ldr">Загрузка...</div></div>
+  </div>
+
+  <!-- ORG -->
+  <div class="sec" id="sec-org">
+    <div class="tabs">
+      <button class="tab active" onclick="setOV('shop',this)">Покупки</button>
+      <button class="tab" onclick="setOV('fin',this)">Финансы</button>
+    </div>
+    <div id="ov-shop">
+      <div class="add-row"><input class="add-inp" id="shop-inp" placeholder="Молоко, хлеб, яблоки..."><button class="add-btn" onclick="addShop()">+</button></div>
+      <div class="card"><div id="shop-list"><div class="ldr">Загрузка...</div></div></div>
+      <button class="clr-btn" onclick="clearShop()">Очистить купленное</button>
+    </div>
+    <div id="ov-fin" style="display:none">
+      <div class="fin-tabs">
+        <button class="fin-tab active" onclick="setFP('day',this)">День</button>
+        <button class="fin-tab" onclick="setFP('week',this)">Неделя</button>
+        <button class="fin-tab" onclick="setFP('month',this)">Месяц</button>
+      </div>
+      <div class="fin-sum">
+        <div class="fc"><div class="fn i" id="f-inc">0</div><div class="fl">Доходы</div></div>
+        <div class="fc"><div class="fn e" id="f-exp">0</div><div class="fl">Расходы</div></div>
+        <div class="fc"><div class="fn b" id="f-bal">0</div><div class="fl">Баланс</div></div>
+      </div>
+      <div class="add-row"><input class="add-inp" id="fin-inp" placeholder="+1000 зарплата / -500 еда кофе"><button class="add-btn" onclick="addFin()">+</button></div>
+      <div class="card"><div id="fin-list"><div class="ldr">Загрузка...</div></div></div>
+    </div>
+  </div>
+
+  <!-- HEALTH -->
+  <div class="sec" id="sec-health">
+    <div class="tabs">
+      <button class="tab active" onclick="setHV('stress',this)">Стресс</button>
+      <button class="tab" onclick="setHV('meds',this)">Таблетки</button>
+      <button class="tab" onclick="setHV('cycle',this)">Цикл</button>
+      <button class="tab" onclick="setHV('water',this)">Вода</button>
+    </div>
+    <!-- STRESS -->
+    <div id="hv-stress">
+      <div class="slbl">Оцените стресс сегодня</div>
+      <div class="card" style="margin-bottom:12px">
+        <div style="padding:14px 16px">
+          <div class="stress-g">
+            <button class="sb" onclick="logStress(1)">1</button><button class="sb" onclick="logStress(2)">2</button><button class="sb" onclick="logStress(3)">3</button><button class="sb" onclick="logStress(4)">4</button><button class="sb" onclick="logStress(5)">5</button>
+            <button class="sb" onclick="logStress(6)">6</button><button class="sb" onclick="logStress(7)">7</button><button class="sb" onclick="logStress(8)">8</button><button class="sb" onclick="logStress(9)">9</button><button class="sb" onclick="logStress(10)">10</button>
+          </div>
+          <div id="stress-msg" style="font-size:13px;color:var(--td);font-weight:500;margin-top:8px;display:none"></div>
+        </div>
+      </div>
+      <div class="slbl">График за неделю</div>
+      <div class="card"><div style="padding:14px 16px"><div class="stress-chart-wrap"><div class="stress-chart" id="stress-chart"></div></div></div></div>
+    </div>
+    <!-- MEDS -->
+    <div id="hv-meds" style="display:none">
+      <div class="slbl">Напоминания о таблетках</div>
+      <div class="card"><div id="meds-list"><div class="ldr">Загрузка...</div></div></div>
+      <div style="padding:12px 0;font-size:12px;color:var(--ts);line-height:1.6;text-align:center">Добавить таблетку можно написав Софии:<br>«Напомни принять витамин D в 20:00»</div>
+    </div>
+    <!-- CYCLE -->
+    <div id="hv-cycle" style="display:none">
+      <div class="slbl">Календарь цикла</div>
+      <div class="card" style="margin-bottom:12px">
+        <div class="mhdr" style="padding:8px 14px 0"><div class="mdn">Пн</div><div class="mdn">Вт</div><div class="mdn">Ср</div><div class="mdn">Чт</div><div class="mdn">Пт</div><div class="mdn">Сб</div><div class="mdn">Вс</div></div>
+        <div class="cycle-cal" id="cycle-cal"></div>
+      </div>
+      <div class="card">
+        <div class="cycle-info" id="cycle-info"><div class="ldr">Загрузка...</div></div>
+      </div>
+      <div style="padding:12px 0;font-size:12px;color:var(--ts);line-height:1.6;text-align:center">Для добавления данных напишите Софии:<br>«Сегодня начался цикл» или «Мой цикл 28 дней»</div>
+    </div>
+    <!-- WATER -->
+    <div id="hv-water" style="display:none">
+      <div class="card">
+        <div style="padding:16px">
+          <div style="display:flex;align-items:center;justify-content:space-between;margin-bottom:12px">
+            <div><div style="font-family:'Playfair Display',serif;font-size:32px;font-weight:700;color:var(--td)"><span id="water-n">0</span><span style="font-size:16px;color:var(--ts)">/8</span></div><div style="font-size:11px;color:var(--ts);text-transform:uppercase;letter-spacing:.05em;font-weight:500;margin-top:2px">стаканов сегодня</div></div>
+            <button class="add-btn" onclick="addWater()" style="border-radius:14px;padding:12px 18px;font-size:18px">💧</button>
+          </div>
+          <div class="water-bar-w"><div class="water-bar" id="water-bar"></div></div>
+          <div style="display:flex;justify-content:space-between;margin-top:6px;font-size:11px;color:var(--ts)"><span>0</span><span>4</span><span>8</span></div>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <!-- SETTINGS -->
+  <div class="sec" id="sec-settings">
+    <div class="slbl">Язык</div>
+    <div class="card" id="lang-card">
+      <div class="sel-grid">
+        <button class="sel-btn" onclick="setSetting('lang','ru',this)" id="lang-ru">🇷🇺 Русский</button>
+        <button class="sel-btn" onclick="setSetting('lang','en',this)" id="lang-en">🇬🇧 English</button>
+      </div>
+    </div>
+    <div class="slbl">Стиль общения</div>
+    <div class="card">
+      <div class="sel-grid">
+        <button class="sel-btn" onclick="setSetting('style','подружка',this)" id="style-подружка">👭 Подружка — тепло, на ты</button>
+        <button class="sel-btn" onclick="setSetting('style','наставник',this)" id="style-наставник">🎯 Наставник — мотивирующий, на вы</button>
+        <button class="sel-btn" onclick="setSetting('style','мотиватор',this)" id="style-мотиватор">🔥 Мотиватор — энергично, вдохновляюще</button>
+        <button class="sel-btn" onclick="setSetting('style','официальный помощник',this)" id="style-официальный помощник">💼 Официальный помощник</button>
+      </div>
+    </div>
+    <div class="slbl">Уведомления</div>
+    <div class="card">
+      <div class="setting-row"><span class="setting-lbl">Утренний отчёт</span><div class="toggle" id="tog-morning" onclick="toggleNotif('morning')"></div></div>
+      <div class="setting-row"><span class="setting-lbl">Вечерний отчёт</span><div class="toggle" id="tog-evening" onclick="toggleNotif('evening')"></div></div>
+      <div class="setting-row"><span class="setting-lbl">Напоминания о событиях</span><div class="toggle" id="tog-events" onclick="toggleNotif('events')"></div></div>
+      <div class="setting-row"><span class="setting-lbl">Напоминания о целях</span><div class="toggle" id="tog-goals" onclick="toggleNotif('goals')"></div></div>
+      <div class="setting-row"><span class="setting-lbl">Вода (каждые 2 часа)</span><div class="toggle" id="tog-water" onclick="toggleNotif('water')"></div></div>
+    </div>
+  </div>
+
+</div>
+
+<div class="bnav">
+  <button class="ni active" onclick="goTo('planning')" id="nav-planning"><div class="ni-icon">📅</div><div class="ni-lbl">Планер</div></button>
+  <button class="ni" onclick="goTo('goals')" id="nav-goals"><div class="ni-icon">🎯</div><div class="ni-lbl">Цели</div></button>
+  <button class="ni" onclick="goTo('org')" id="nav-org"><div class="ni-icon">🗂</div><div class="ni-lbl">Дневник</div></button>
+  <button class="ni" onclick="goTo('health')" id="nav-health"><div class="ni-icon">❤️</div><div class="ni-lbl">Здоровье</div></button>
+  <button class="ni" onclick="goTo('settings')" id="nav-settings"><div class="ni-icon">⚙️</div><div class="ni-lbl">Настройки</div></button>
+</div>
+
+<button class="fab" id="fab" onclick="openModal()">+ Добавить</button>
+
+<div class="mo" id="mo" onclick="closeMO(event)">
+  <div class="modal">
+    <div class="modal-ttl">Добавить событие</div>
+    <div class="ok-msg" id="ok-msg">✓ Сохранено!</div>
+    <textarea id="modal-inp" placeholder="Напишите что угодно:&#10;• пилатес каждую пятницу в 10:00&#10;• ногти 1-го числа в 17:00&#10;• завтра в 14:00 встреча с Аней&#10;• у Влада тренировка пн-пт в 15:00"></textarea>
+    <div class="modal-hint">Можно несколько событий сразу — София всё поймёт 🌸</div>
+    <div class="mbtns">
+      <button class="mbtn s" onclick="closeMO()">Отмена</button>
+      <button class="mbtn p" id="msave" onclick="saveModal()">Сохранить</button>
+    </div>
+  </div>
+</div>
+
+<script>
+const tg=window.Telegram?.WebApp;
+if(tg){tg.ready();tg.expand();}
+const uid=tg?.initDataUnsafe?.user?.id||null;
+const uname=tg?.initDataUnsafe?.user?.first_name||'';
+const API='https://sofia-production-fcc2.up.railway.app';
+if(uname)document.getElementById('top-user').textContent=uname;
+
+// State
+let evs=[],tasks=[],goals=[],shop=[],fins=[],meds=[],stressLogs=[],cycleData=null;
+let water=0,wkStart=getMon(new Date()),curMon=new Date(),selDay=null;
+let planView='cal',calView='week',taskFilter='active',goalsView='active',orgView='shop',finPeriod='month',healthView='stress';
+let userSettings={lang:'ru',style:'наставник',morning:false,evening:false,water:false};
+
+const MG=['января','февраля','марта','апреля','мая','июня','июля','августа','сентября','октября','ноября','декабря'];
+const MN=['январь','февраль','март','апрель','май','июнь','июль','август','сентябрь','октябрь','ноябрь','декабрь'];
+const DN=['Понедельник','Вторник','Среда','Четверг','Пятница','Суббота','Воскресенье'];
+const CL=['#81D4C8','#F2A4B0','#A8D8A8','#F2C4A0','#B0A8D8','#c4a060','#a0b8d8'];
+
+function getMon(d){const c=new Date(d);const wd=c.getDay();c.setDate(c.getDate()-wd+(wd===0?-6:1));c.setHours(0,0,0,0);return c;}
+function ds(d){return d.getFullYear()+'-'+(d.getMonth()+1).toString().padStart(2,'0')+'-'+d.getDate().toString().padStart(2,'0');}
+function isTd(d){const t=new Date();return d.getDate()===t.getDate()&&d.getMonth()===t.getMonth()&&d.getFullYear()===t.getFullYear();}
+function col(t){let h=0;for(const c of t)h+=c.charCodeAt(0);return CL[h%CL.length];}
+function evsForDate(d){const s=ds(d),wd=d.getDay()===0?6:d.getDay()-1,dom=d.getDate();return evs.filter(e=>e.repeat_type==='once'?e.event_date===s:e.repeat_type==='weekly'?e.repeat_day===wd:e.repeat_type==='monthly_day'?e.repeat_month_day===dom:false).sort((a,b)=>(a.event_time||'').localeCompare(b.event_time||''));}
+
+// Handle URL tab param
+const urlTab=new URLSearchParams(window.location.search).get('tab');
+if(urlTab)setTimeout(()=>goTo(urlTab),100);
+
+function goTo(s){
+  document.querySelectorAll('.sec').forEach(x=>x.classList.remove('active'));
+  document.querySelectorAll('.ni').forEach(x=>x.classList.remove('active'));
+  const sec=document.getElementById('sec-'+s);
+  const nav=document.getElementById('nav-'+s);
+  if(sec)sec.classList.add('active');
+  if(nav)nav.classList.add('active');
+  if(s==='planning')renderWeek();
+  if(s==='goals')renderGoals();
+  if(s==='health'){renderStressChart();renderMeds();renderCycle();renderWater();}
+  if(s==='settings')renderSettings();
+  if(s==='org'&&orgView==='fin')renderFin();
+}
+
+// PLANNING VIEWS
+function setPV(v,btn){
+  planView=v;
+  document.querySelectorAll('#sec-planning>.tabs>.tab').forEach(b=>b.classList.remove('active'));btn.classList.add('active');
+  document.getElementById('pv-cal').style.display=v==='cal'?'block':'none';
+  document.getElementById('pv-tasks').style.display=v==='tasks'?'block':'none';
+  document.getElementById('pv-rems').style.display=v==='rems'?'block':'none';
+  document.getElementById('fab').style.display=v==='rems'?'none':'flex';
+  if(v==='cal')renderWeek();
+  if(v==='tasks')renderTasks();
+  if(v==='rems')renderReminders();
+}
+function setCV(v,btn){
+  calView=v;
+  document.querySelectorAll('#pv-cal>.tabs>.tab').forEach(b=>b.classList.remove('active'));btn.classList.add('active');
+  document.getElementById('cv-week').style.display=v==='week'?'block':'none';
+  document.getElementById('cv-month').style.display=v==='month'?'block':'none';
+  if(v==='week')renderWeek();else renderMonth();
+}
+
+// WEEK
+function navW(d){wkStart.setDate(wkStart.getDate()+d*7);renderWeek();}
+function resetW(){wkStart=getMon(new Date());renderWeek();}
+function renderWeek(){
+  const days=Array.from({length:7},(_,i)=>{const d=new Date(wkStart);d.setDate(d.getDate()+i);return d;});
+  document.getElementById('w-lbl').textContent=`${days[0].getDate()} ${MG[days[0].getMonth()]} — ${days[6].getDate()} ${MG[days[6].getMonth()]}`;
+  document.getElementById('week-content').innerHTML=days.map(d=>{
+    const evArr=evsForDate(d),wd=d.getDay()===0?6:d.getDay()-1;
+    return`<div class="day-block"><div class="day-hdr"><span class="day-nm">${DN[wd]}</span><span class="day-dt">${d.getDate()} ${MG[d.getMonth()]}</span>${isTd(d)?'<span class="td-pill">Сегодня</span>':''}</div>${evArr.length?evArr.map(e=>`<div class="ev"><div class="ev-t">${e.event_time||''}</div><div class="ev-dot" style="background:${col(e.title)}"></div><div style="flex:1"><div class="ev-ttl">${e.title}</div>${e.person_name?`<div class="ev-per">${e.person_name}</div>`:''}<span class="ev-tag ${e.repeat_type!=='once'?'tr':'to'}">${e.repeat_type!=='once'?'🔄 регулярно':'разово'}</span></div><button class="xbtn" onclick="delEv(${e.id})">×</button></div>`).join(''):'<div class="empty">Событий нет</div>'}</div>`;
+  }).join('');
+}
+
+// MONTH
+function navM(d){curMon.setMonth(curMon.getMonth()+d);selDay=null;document.getElementById('mday-det').innerHTML='';renderMonth();}
+function renderMonth(){
+  const y=curMon.getFullYear(),m=curMon.getMonth();
+  document.getElementById('m-lbl').textContent=`${MN[m].charAt(0).toUpperCase()+MN[m].slice(1)} ${y}`;
+  const first=new Date(y,m,1),last=new Date(y,m+1,0),sw=first.getDay()===0?6:first.getDay()-1;
+  let html='';
+  for(let i=0;i<sw;i++){const d=new Date(y,m,1-sw+i);html+=`<div class="mc other"><div class="mn">${d.getDate()}</div></div>`;}
+  for(let day=1;day<=last.getDate();day++){
+    const d=new Date(y,m,day),ea=evsForDate(d),isSel=selDay&&ds(d)===ds(selDay);
+    html+=`<div class="mc${isTd(d)?' today':''}${isSel?' sel':''}" onclick="selMD(new Date(${y},${m},${day}))"><div class="${isTd(d)?'mn-w':''}"><div class="mn">${day}</div></div>${ea.length?`<div class="mdots">${ea.slice(0,3).map(e=>`<div class="mdot" style="background:${col(e.title)}"></div>`).join('')}</div>`:''}</div>`;
+  }
+  document.getElementById('mgrid').innerHTML=html;
+  if(selDay)renderMDD(selDay);
+}
+function selMD(d){selDay=d;renderMonth();}
+function renderMDD(d){
+  const ea=evsForDate(d),wd=d.getDay()===0?6:d.getDay()-1;
+  document.getElementById('mday-det').innerHTML=`<div class="card"><div class="card-ttl">${DN[wd]}, ${d.getDate()} ${MG[d.getMonth()]}</div>${ea.length?ea.map(e=>`<div class="ev"><div class="ev-t">${e.event_time||''}</div><div class="ev-dot" style="background:${col(e.title)}"></div><div style="flex:1"><div class="ev-ttl">${e.title}</div></div><button class="xbtn" onclick="delEv(${e.id})">×</button></div>`).join(''):'<div class="empty">Событий нет</div>'}</div>`;
+}
+
+// TASKS
+function setTaskFilter(f,btn){taskFilter=f;document.querySelectorAll('#pv-tasks .tabs .tab').forEach(b=>b.classList.remove('active'));btn.classList.add('active');renderTasks();}
+function renderTasks(){
+  const list=tasks.filter(t=>taskFilter==='active'?!t.done:t.done);
+  document.getElementById('tasks-list').innerHTML=list.length?list.map(t=>`<div class="task"><div class="chk${t.done?' done':''}" onclick="togTask(${t.id})"></div><div class="task-tx${t.done?' done':''}">${t.text}</div><button class="xbtn" onclick="delTask(${t.id})">×</button></div>`).join(''):`<div class="empty" style="padding:14px">${taskFilter==='active'?'Всё выполнено! 🎉':'Нет выполненных дел'}</div>`;
+}
+async function addTask(){const i=document.getElementById('task-inp');const tx=i.value.trim();if(!tx)return;try{const r=await fetch(`${API}/app/tasks`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({user_id:uid,text:tx})});tasks.unshift(await r.json());}catch(e){tasks.unshift({id:Date.now(),text:tx,done:false});}i.value='';renderTasks();}
+async function togTask(id){const t=tasks.find(x=>x.id===id);if(!t)return;t.done=!t.done;try{await fetch(`${API}/app/tasks/${id}`,{method:'PATCH',headers:{'Content-Type':'application/json'},body:JSON.stringify({done:t.done,user_id:uid})});}catch(e){}renderTasks();}
+async function delTask(id){tasks=tasks.filter(x=>x.id!==id);try{await fetch(`${API}/app/tasks/${id}`,{method:'DELETE',headers:{'Content-Type':'application/json'},body:JSON.stringify({user_id:uid})});}catch(e){}renderTasks();}
+
+// REMINDERS
+async function renderReminders(){
+  const now=new Date();
+  let active=[],history=[];
+  try{
+    const r=await fetch(`${API}/app/reminders/${uid}`);
+    const data=await r.json();
+    data.forEach(rem=>{
+      const remTime=rem.time_str?new Date(now.toDateString()+' '+rem.time_str):null;
+      if(remTime&&remTime>now)active.push(rem);else history.push(rem);
+    });
+  }catch(e){}
+  document.getElementById('rems-active').innerHTML=active.length?active.map(r=>`<div class="rem"><div class="rem-dot active"></div><div class="rem-body"><div class="rem-tx">${r.text}</div><div class="rem-time">${r.time_str||''}</div><span class="rem-badge rb-active">Активно</span></div></div>`).join(''):'<div class="empty" style="padding:14px">Нет активных напоминаний</div>';
+  document.getElementById('rems-history').innerHTML=history.slice(0,10).length?history.slice(0,10).map(r=>`<div class="rem"><div class="rem-dot sent"></div><div class="rem-body"><div class="rem-tx sent">${r.text}</div><div class="rem-time">${r.time_str||''}</div><span class="rem-badge rb-sent">Отправлено</span></div></div>`).join(''):'<div class="empty" style="padding:14px">История пуста</div>';
+}
+
+// GOALS
+function setGV(v,btn){goalsView=v;document.querySelectorAll('#sec-goals .tabs .tab').forEach(b=>b.classList.remove('active'));btn.classList.add('active');renderGoals();}
+function renderGoals(){
+  const list=goals.filter(g=>goalsView==='active'?g.progress<100:g.progress>=100);
+  document.getElementById('goals-list').innerHTML=list.length?list.map(g=>`<div class="card"><div class="goal${g.progress>=100?' goal-done':''}"><div class="goal-top"><div class="goal-nm">${g.title}</div><div class="goal-pct">${g.progress}%</div></div><div class="goal-bar-w"><div class="goal-bar" style="width:${g.progress}%"></div></div>${g.deadline?`<div class="goal-dl">До ${g.deadline}</div>`:''}</div></div>`).join(''):`<div class="ldr">${goalsView==='active'?'Нет активных целей':'Нет завершённых целей'}</div>`;
+}
+async function addGoal(){const i=document.getElementById('goal-inp');const tx=i.value.trim();if(!tx)return;try{const r=await fetch(`${API}/app/goals`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({user_id:uid,title:tx})});goals.unshift(await r.json());}catch(e){goals.unshift({id:Date.now(),title:tx,progress:0,deadline:null});}i.value='';renderGoals();}
+
+// SHOPPING
+function renderShop(){document.getElementById('shop-list').innerHTML=shop.length?shop.map(i=>`<div class="shop"><div class="schk${i.done?' done':''}" onclick="togShop(${i.id})"></div><div class="shop-tx${i.done?' done':''}">${i.item}</div><button class="xbtn" onclick="delShop(${i.id})">×</button></div>`).join(''):'<div class="empty" style="padding:14px">Список пуст</div>';}
+async function addShop(){const inp=document.getElementById('shop-inp');const items=inp.value.trim().split(/[,،
+]/).map(s=>s.trim()).filter(Boolean);for(const item of items){try{const r=await fetch(`${API}/app/shopping`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({user_id:uid,item})});shop.push(await r.json());}catch(e){shop.push({id:Date.now()+Math.random(),item,done:false});}}inp.value='';renderShop();}
+async function togShop(id){const i=shop.find(x=>x.id===id);if(!i)return;i.done=!i.done;try{await fetch(`${API}/app/shopping/${id}`,{method:'PATCH',headers:{'Content-Type':'application/json'},body:JSON.stringify({done:i.done,user_id:uid})});}catch(e){}renderShop();}
+async function delShop(id){shop=shop.filter(x=>x.id!==id);try{await fetch(`${API}/app/shopping/${id}`,{method:'DELETE',headers:{'Content-Type':'application/json'},body:JSON.stringify({user_id:uid})});}catch(e){}renderShop();}
+async function clearShop(){shop=shop.filter(i=>!i.done);try{await fetch(`${API}/app/shopping/clear`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({user_id:uid})});}catch(e){}renderShop();}
+
+// FINANCES
+function setOV(v,btn){orgView=v;document.querySelectorAll('#sec-org>.tabs>.tab').forEach(b=>b.classList.remove('active'));btn.classList.add('active');document.getElementById('ov-shop').style.display=v==='shop'?'block':'none';document.getElementById('ov-fin').style.display=v==='fin'?'block':'none';if(v==='fin')renderFin();}
+function setFP(p,btn){finPeriod=p;document.querySelectorAll('.fin-tab').forEach(b=>b.classList.remove('active'));btn.classList.add('active');renderFin();}
+function renderFin(){
+  const now=new Date();
+  let filtered=fins;
+  if(finPeriod==='day'){const today=ds(now);filtered=fins.filter(f=>f.date===today||!f.date);}
+  else if(finPeriod==='week'){const wk=getMon(now);filtered=fins.filter(f=>{if(!f.date)return true;const d=new Date(f.date);return d>=wk&&d<=now;});}
+  const inc=filtered.filter(f=>f.type==='income').reduce((s,f)=>s+f.amount,0);
+  const exp=filtered.filter(f=>f.type==='expense').reduce((s,f)=>s+f.amount,0);
+  document.getElementById('f-inc').textContent=Math.round(inc);
+  document.getElementById('f-exp').textContent=Math.round(exp);
+  document.getElementById('f-bal').textContent=Math.round(inc-exp);
+  document.getElementById('fin-list').innerHTML=filtered.length?filtered.slice(0,20).map(f=>`<div class="fi"><div class="fi-ic ${f.type}">${f.type==='income'?'➕':'➖'}</div><div class="fi-inf"><div class="fi-cat">${f.category||'Другое'}</div>${f.description?`<div class="fi-desc">${f.description}</div>`:''}</div><div class="fi-amt ${f.type}">${f.type==='income'?'+':'−'}${Math.round(f.amount)}</div></div>`).join(''):'<div class="empty" style="padding:14px">Записей нет</div>';
+}
+async function addFin(){const inp=document.getElementById('fin-inp');const tx=inp.value.trim();if(!tx)return;const pts=tx.split(' ');const raw=pts[0].replace(',','.');const isI=raw.startsWith('+');const amt=parseFloat(raw.replace(/[+\-]/g,''));if(isNaN(amt))return;const cat=pts[1]||'Другое';const desc=pts.slice(2).join(' ');const type=isI?'income':'expense';const today=ds(new Date());try{const r=await fetch(`${API}/app/finance`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({user_id:uid,amount:amt,type,category:cat,description:desc})});fins.unshift({...(await r.json()),date:today});}catch(e){fins.unshift({id:Date.now(),amount:amt,type,category:cat,description:desc,date:today});}inp.value='';renderFin();}
+
+// HEALTH VIEWS
+function setHV(v,btn){healthView=v;document.querySelectorAll('#sec-health>.tabs>.tab').forEach(b=>b.classList.remove('active'));btn.classList.add('active');document.getElementById('hv-stress').style.display=v==='stress'?'block':'none';document.getElementById('hv-meds').style.display=v==='meds'?'block':'none';document.getElementById('hv-cycle').style.display=v==='cycle'?'block':'none';document.getElementById('hv-water').style.display=v==='water'?'block':'none';}
+
+// STRESS
+function renderStressChart(){
+  const chart=document.getElementById('stress-chart');
+  if(!chart)return;
+  const days=Array.from({length:7},(_,i)=>{const d=new Date();d.setDate(d.getDate()-6+i);return d;});
+  chart.innerHTML=days.map(d=>{
+    const ds2=ds(d);
+    const dayLogs=stressLogs.filter(l=>l.date===ds2);
+    const avg=dayLogs.length?Math.round(dayLogs.reduce((s,l)=>s+l.level,0)/dayLogs.length):0;
+    const h=avg?Math.round(avg/10*100):4;
+    const c=avg<=3?'#81D4C8':avg<=6?'#F2C4A0':'#F2A4B0';
+    return`<div class="sc-bar" style="height:${h}%;background:${c}"><span class="sc-lbl">${d.getDate()}.${d.getMonth()+1}</span></div>`;
+  }).join('');
+}
+async function logStress(level){
+  document.querySelectorAll('.sb').forEach((b,i)=>b.classList.toggle('sel',i+1===level));
+  const msgs=['Отлично! 🌟','Прекрасно 🌸','Хорошо 👍','Неплохо','Умеренно — отдохните немного','Высокий — сделайте перерыв','Очень высокий — дышите глубже','Критический — позаботьтесь о себе 💙','Очень тяжело 💙','Я рядом 🌸'];
+  const m=document.getElementById('stress-msg');m.textContent=msgs[level-1];m.style.display='block';
+  const today=ds(new Date());stressLogs.push({level,date:today});
+  try{await fetch(`${API}/app/stress`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({user_id:uid,level})});}catch(e){}
+  renderStressChart();
+}
+
+// MEDS
+function renderMeds(){document.getElementById('meds-list').innerHTML=meds.length?meds.map(m=>`<div class="med-item"><div class="med-t">${m.time_str}</div><div class="med-n">${m.name}</div><button class="med-btn${m.taken?' taken':''}" onclick="takeMed(${m.id})">${m.taken?'✓ Принято':'Принять'}</button></div>`).join(''):'<div class="empty" style="padding:14px">Таблетки не добавлены</div>';}
+async function takeMed(id){const m=meds.find(x=>x.id===id);if(!m)return;m.taken=true;try{await fetch(`${API}/app/meds/${id}/take`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({user_id:uid})});}catch(e){}renderMeds();}
+
+// CYCLE
+function renderCycle(){
+  if(!cycleData){document.getElementById('cycle-info').innerHTML='<div class="empty" style="padding:14px">Данных о цикле нет.<br>Напишите Софии: «Сегодня начался цикл»</div>';document.getElementById('cycle-cal').innerHTML='';return;}
+  const start=new Date(cycleData.start_date);const length=cycleData.cycle_length||28;const today=new Date();
+  const dayOfCycle=Math.floor((today-start)/86400000)%length+1;
+  const nextStart=new Date(start);while(nextStart<=today)nextStart.setDate(nextStart.getDate()+length);
+  const daysLeft=Math.ceil((nextStart-today)/86400000);
+  document.getElementById('cycle-info').innerHTML=`
+    <div class="cycle-row"><span class="cycle-key">День цикла</span><span class="cycle-val">${dayOfCycle} из ${length}</span></div>
+    <div class="cycle-row"><span class="cycle-key">До следующего</span><span class="cycle-val">${daysLeft} дней</span></div>
+    <div class="cycle-row"><span class="cycle-key">Начало</span><span class="cycle-val">${start.getDate()} ${MG[start.getMonth()]}</span></div>
+    <div class="cycle-row"><span class="cycle-key">Прогноз</span><span class="cycle-val">${nextStart.getDate()} ${MG[nextStart.getMonth()]}</span></div>`;
+  const y=today.getFullYear(),m=today.getMonth();
+  const first=new Date(y,m,1),last=new Date(y,m+1,0),sw=first.getDay()===0?6:first.getDay()-1;
+  let html='';
+  for(let i=0;i<sw;i++)html+=`<div></div>`;
+  for(let day=1;day<=last.getDate();day++){
+    const d=new Date(y,m,day);
+    const diff=Math.floor((d-start)/86400000)%length;
+    const isPeriod=diff>=0&&diff<5;
+    const isPred=diff>=length-3;
+    const isT=isTd(d);
+    html+=`<div class="cc${isPeriod?' period':''}${isPred&&!isPeriod?' predicted':''}${isT?' today':''}">${day}</div>`;
+  }
+  document.getElementById('cycle-cal').innerHTML=html;
+}
+
+// WATER
+function renderWater(){document.getElementById('water-n').textContent=water;document.getElementById('water-bar').style.width=Math.min(water/8*100,100)+'%';}
+async function addWater(){water=Math.min(water+1,8);try{await fetch(`${API}/app/water`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({user_id:uid,glasses:water})});}catch(e){}renderWater();}
+
+// SETTINGS
+function renderSettings(){
+  document.querySelectorAll('[id^="lang-"]').forEach(b=>b.classList.remove('active'));
+  document.querySelectorAll('[id^="style-"]').forEach(b=>b.classList.remove('active'));
+  const lb=document.getElementById('lang-'+userSettings.lang);if(lb)lb.classList.add('active');
+  const sb=document.getElementById('style-'+userSettings.style);if(sb)sb.classList.add('active');
+  ['morning','evening','events','goals','water'].forEach(k=>{
+    const t=document.getElementById('tog-'+k);if(t)t.classList.toggle('on',userSettings[k]||false);
+  });
+}
+async function setSetting(key,val,btn){
+  userSettings[key]=val;
+  if(key==='lang'){document.querySelectorAll('[id^="lang-"]').forEach(b=>b.classList.remove('active'));btn.classList.add('active');}
+  if(key==='style'){document.querySelectorAll('[id^="style-"]').forEach(b=>b.classList.remove('active'));btn.classList.add('active');}
+  try{await fetch(`${API}/app/settings`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({user_id:uid,key,value:val})});}catch(e){}
+}
+async function toggleNotif(key){
+  userSettings[key]=!userSettings[key];
+  const t=document.getElementById('tog-'+key);if(t)t.classList.toggle('on',userSettings[key]);
+  try{await fetch(`${API}/app/settings`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({user_id:uid,key,value:userSettings[key]})});}catch(e){}
+}
+
+// EVENTS
+async function delEv(id){evs=evs.filter(e=>e.id!==id);try{await fetch(`${API}/app/events/${id}`,{method:'DELETE',headers:{'Content-Type':'application/json'},body:JSON.stringify({user_id:uid})});}catch(e){}if(calView==='week')renderWeek();else renderMonth();}
+
+// MODAL
+function openModal(){document.getElementById('mo').classList.add('open');setTimeout(()=>document.getElementById('modal-inp').focus(),100);}
+function closeMO(e){if(e&&e.target!==document.getElementById('mo'))return;document.getElementById('mo').classList.remove('open');document.getElementById('modal-inp').value='';document.getElementById('ok-msg').style.display='none';}
+async function saveModal(){
+  const tx=document.getElementById('modal-inp').value.trim();if(!tx)return;
+  const btn=document.getElementById('msave');btn.textContent='Сохраняю...';btn.disabled=true;
+  try{const r=await fetch(`${API}/planner/add`,{method:'POST',headers:{'Content-Type':'application/json'},body:JSON.stringify({user_id:uid,text:tx})});const d=await r.json();if(d.ok){await loadEvs();document.getElementById('ok-msg').style.display='block';document.getElementById('modal-inp').value='';setTimeout(()=>{document.getElementById('mo').classList.remove('open');document.getElementById('ok-msg').style.display='none';},1500);}}
+  catch(e){alert('Ошибка. Попробуйте ещё раз.');}
+  btn.textContent='Сохранить';btn.disabled=false;
+}
+
+// LOAD
+async function loadEvs(){if(!uid)return;try{const r=await fetch(`${API}/planner/events/${uid}`);evs=await r.json();}catch(e){evs=[];}if(calView==='week')renderWeek();else renderMonth();}
+async function loadTasks(){if(!uid)return;try{const r=await fetch(`${API}/app/tasks/${uid}`);tasks=await r.json();}catch(e){tasks=[];}}
+async function loadGoals(){if(!uid)return;try{const r=await fetch(`${API}/app/goals/${uid}`);goals=await r.json();}catch(e){goals=[];}}
+async function loadShop(){if(!uid)return;try{const r=await fetch(`${API}/app/shopping/${uid}`);shop=await r.json();}catch(e){shop=[];}}
+async function loadFins(){if(!uid)return;try{const r=await fetch(`${API}/app/finance/${uid}`);fins=(await r.json()).map(f=>({...f,date:ds(new Date())}));}catch(e){fins=[];}}
+async function loadMeds(){if(!uid)return;try{const r=await fetch(`${API}/app/meds/${uid}`);meds=await r.json();}catch(e){meds=[];}}
+async function loadWater(){if(!uid)return;try{const r=await fetch(`${API}/app/water/${uid}`);const d=await r.json();water=d.glasses||0;}catch(e){water=0;}}
+async function loadStress(){if(!uid)return;try{const r=await fetch(`${API}/app/stress/${uid}`);stressLogs=await r.json();}catch(e){stressLogs=[];}}
+async function loadCycle(){if(!uid)return;try{const r=await fetch(`${API}/app/cycle/${uid}`);cycleData=await r.json();}catch(e){cycleData=null;}}
+async function loadSettings(){if(!uid)return;try{const r=await fetch(`${API}/app/usersettings/${uid}`);const d=await r.json();if(d)Object.assign(userSettings,d);}catch(e){}}
+
+(async()=>{
+  await Promise.all([loadEvs(),loadTasks(),loadGoals(),loadShop(),loadFins(),loadMeds(),loadWater(),loadStress(),loadCycle(),loadSettings()]);
+  renderWeek();renderShop();renderGoals();renderFin();
+  const tab=new URLSearchParams(window.location.search).get('tab');
+  if(tab)goTo(tab);
+})();
+</script>
+</body>
+</html>
